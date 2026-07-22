@@ -21,7 +21,23 @@ for f in "$REPO_DIR"/agents/*.md; do
   echo "linked: ${name}"
 done
 
-# 2. settings.json に "agent": "auto-router" を設定
+# 2. スキル定義を symlink（既存の実ディレクトリは .bak 退避）
+SKILLS_DIR="${CLAUDE_DIR}/skills"
+mkdir -p "$SKILLS_DIR"
+for d in "$REPO_DIR"/skills/*/; do
+  [ -d "$d" ] || continue
+  src="${d%/}"
+  name="$(basename "$src")"
+  dest="${SKILLS_DIR}/${name}"
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    mv "$dest" "${dest}.bak.${STAMP}"
+    echo "backup: skills/${name} -> ${name}.bak.${STAMP}"
+  fi
+  ln -sfn "$src" "$dest"
+  echo "linked skill: ${name}"
+done
+
+# 3. settings.json に "agent": "auto-router" を設定
 if command -v jq >/dev/null 2>&1; then
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "${SETTINGS}.bak.${STAMP}"
@@ -39,7 +55,7 @@ else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" を追加してください。'
 fi
 
-# 3. ペイン起動エイリアス
+# 4. ペイン起動エイリアス
 case "${SHELL##*/}" in
   zsh) RC="${HOME}/.zshrc" ;;
   *)   RC="${HOME}/.bashrc" ;;
