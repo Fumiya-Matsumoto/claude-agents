@@ -68,8 +68,9 @@ cd claude-agents
 スクリプトがやること:
 
 1. `agents/*.md` を `~/.claude/agents/` へ **symlink**（既存の実ファイルは `.bak` 退避）
-2. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）
-3. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
+2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
+3. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）
+4. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
 
 symlink 方式なので、**更新は `git pull` だけ**で全マシンに反映されます。
 
@@ -107,6 +108,17 @@ npx skills@latest add mattpocock/skills
 ## プロジェクト特化
 
 エージェントは**プロジェクト側の同名定義が優先**されます。プロジェクト固有の運用ルール（リポジトリ名、PR 規約、デプロイ確認、危険操作リスト）を焼き込みたい場合は、`agents/orchestrator.md` をプロジェクトの `.claude/agents/orchestrator.md` にコピーして「儀式」セクションを差し替えてください。
+
+GitHub にアップしていないプロジェクト（gh Issue / PR が使えない）では、追跡手段をプロジェクト固有のもの（タスク CLI、判断ログのディレクトリ等）に差し替えた auto-router / orchestrator オーバーライドを置いてください。
+
+## フィードバックループ
+
+各マシンでの運用で得た知見（誤ルーティング・プロンプトの穴・摩擦）は、このリポジトリの **GitHub Issue（label: `feedback`）** に集約し、エージェント定義の改訂へ還元します。
+
+- **捕捉**: セッション中に「エージェントFB」と言うと `agents-feedback` スキル（install.sh が symlink 導入）が起動し、内容をサニタイズした上で `gh issue create --label feedback` で Issue 化される。gh が使えない環境では `feedback/` にファイルとして書き、後で Issue 化する
+- **蒸留**: 「FB蒸留」で open な feedback Issue を 1 件ずつレビューし、採用分を `agents/*.md` / README に反映してクローズ
+- **伝播**: agents / skills は symlink 配布なので、改訂後は各マシンで `git pull` するだけ
+- **注意**: 公開リポジトリのため、Issue 本文にもプロジェクト固有情報（クライアント名・個人情報・金額等）を書かない。一般化した記述に変換する
 
 ## アンインストール
 
