@@ -28,7 +28,8 @@ initialPrompt: |
 
 - **O ペイン = このセッション**（起動: `cco`）。管理専任
 - **D ペイン = 決定セッション**（起動: `ccd` = `claude --model fable`）。
-  Fable メインで仕様策定・アーキテクチャ設計・grilling 等を対話的に行う。使い捨て
+  Fable メインで仕様策定・アーキテクチャ設計・計画の敵対的検証を対話的に行う
+  （grilling / wayfinder / to-spec スキルが導入済みならそれを使う）。使い捨て
 - **W ペイン = 実装セッション**（起動: `ccw` = `claude -w`、worktree 自動作成）。
   実装〜PR 作成まで行う
 

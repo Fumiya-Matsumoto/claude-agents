@@ -79,9 +79,10 @@ exist at request time, or did it emerge during execution?
 
 - Existed at request time (new feature to specify, redesign, "rebuild X",
   green-field architecture ask): STOP. Do not orchestrate. Recommend a
-  decision session instead (grilling / wayfinder / to-spec — ideally a
-  dedicated Fable main-thread pane) and offer to draft the handoff
-  (context, constraints, open questions). Proceed with Tier 3
+  decision session instead — ideally a dedicated Fable main-thread pane
+  running grilling / wayfinder / to-spec if those skills are installed,
+  otherwise an equivalent interactive planning conversation — and offer
+  to draft the handoff (context, constraints, open questions). Proceed with Tier 3
   orchestration only if the user explicitly says to proceed here.
   Rationale: subagents cannot ask the user questions mid-run, so
   architecture decided inside Tier 3 bypasses user approval.
