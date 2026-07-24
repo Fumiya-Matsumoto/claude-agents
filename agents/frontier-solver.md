@@ -2,7 +2,7 @@
 name: frontier-solver
 description: Frontier-level solver for the hardest implementation or debugging subproblems where the correct solution itself remains uncertain after investigation. Use very sparingly.
 model: fable
-effort: high
+effort: xhigh
 tools: Read, Edit, Write, Bash, Grep, Glob
 maxTurns: 40
 ---

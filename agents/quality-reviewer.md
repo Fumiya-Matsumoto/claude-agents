@@ -1,6 +1,6 @@
 ---
 name: quality-reviewer
-description: Independent review for non-trivial but not frontier-level changes. Use after complex Opus or multi-file implementation when Fable review is unnecessary.
+description: Independent review for non-trivial but not frontier-level changes. Default reviewer after Tier 2 implementation, and for Tier 1 work touching the high-risk surface, when Fable review is unnecessary.
 model: opus
 effort: high
 tools: Read, Grep, Glob, Bash

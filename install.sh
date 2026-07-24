@@ -47,9 +47,12 @@ if command -v jq >/dev/null 2>&1; then
     printf '{\n  "agent": "auto-router"\n}\n' > "$SETTINGS"
   fi
   echo 'settings.json: "agent": "auto-router" を設定'
-  if jq -e 'has("model")' "$SETTINGS" | grep -q true; then
-    echo '⚠ settings.json に "model" キーが残っています。auto-router の model: sonnet と競合しうるため削除を推奨します:'
-    echo "    jq 'del(.model)' ${SETTINGS} > /tmp/s.json && mv /tmp/s.json ${SETTINGS}"
+  if jq -e 'has("model") or has("effortLevel")' "$SETTINGS" | grep -q true; then
+    echo '⚠ settings.json に "model" / "effortLevel" キーが残っています。'
+    echo '  これらはメインセッションで agents/*.md の frontmatter に勝つため、model / effort の'
+    echo '  割当が settings.json（machine-local・配布されない）と frontmatter の 2 箇所に分裂します。'
+    echo '  このリポジトリは frontmatter を唯一の真実の源とする設計なので、削除を推奨します:'
+    echo "    jq 'del(.model, .effortLevel)' ${SETTINGS} > /tmp/s.json && mv /tmp/s.json ${SETTINGS}"
   fi
 else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" を追加してください。'
@@ -65,9 +68,9 @@ if ! grep -qF "$MARKER" "$RC" 2>/dev/null; then
   cat >> "$RC" << EOF
 
 $MARKER
-alias cco='claude --agent orchestrator'   # Orchestrator ペイン（管理専任）
-alias ccd='claude --model fable'          # Decision ペイン（Fable で意思決定）
-alias ccw='claude -w'                     # Worker ペイン（worktree 自動作成）
+alias cco='claude --agent orchestrator'                              # Orchestrator ペイン（管理専任）
+alias ccd='claude --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）
+alias ccw='claude -w'                                                # Worker ペイン（worktree 自動作成）
 # <<< claude-agents aliases <<<
 EOF
   echo "aliases: ${RC} に追加しました（source ${RC} で有効化）"

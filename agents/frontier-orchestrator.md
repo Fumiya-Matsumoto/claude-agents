@@ -2,7 +2,7 @@
 name: frontier-orchestrator
 description: Highest-quality orchestrator for ambiguous, architectural, high-risk, multi-agent, and frontier engineering tasks. Use proactively whenever choosing the wrong direction would be expensive.
 model: fable
-effort: high
+effort: xhigh
 tools: Agent, Read, Grep, Glob, Bash
 maxTurns: 40
 ---
