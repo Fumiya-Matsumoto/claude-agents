@@ -2,7 +2,7 @@
 name: routine-worker
 description: Strong implementation worker for clear, well-scoped coding tasks. Use proactively for routine implementation, tests, CRUD, UI work, and mechanical refactors.
 model: sonnet
-effort: high
+effort: xhigh
 tools: Read, Edit, Write, Bash, Grep, Glob
 maxTurns: 40
 ---

@@ -2,7 +2,7 @@
 name: test-runner
 description: Verification specialist. Runs targeted tests, type checks, linting, and relevant integration checks and summarizes failures without changing implementation.
 model: sonnet
-effort: medium
+effort: high
 tools: Read, Grep, Glob, Bash
 maxTurns: 20
 ---

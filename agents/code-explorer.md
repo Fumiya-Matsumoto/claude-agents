@@ -2,7 +2,7 @@
 name: code-explorer
 description: Fast read-only repository exploration and factual codebase mapping. Use proactively before expensive models spend context searching through many files.
 model: sonnet
-effort: medium
+effort: high
 tools: Read, Grep, Glob, Bash
 maxTurns: 20
 ---

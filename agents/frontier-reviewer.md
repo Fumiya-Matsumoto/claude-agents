@@ -2,7 +2,7 @@
 name: frontier-reviewer
 description: Independent highest-quality review for high-risk changes, architecture, security, auth, billing, data integrity, migrations, concurrency, and large blast-radius changes.
 model: fable
-effort: high
+effort: xhigh
 tools: Read, Grep, Glob, Bash
 maxTurns: 25
 ---
