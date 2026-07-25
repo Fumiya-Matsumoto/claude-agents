@@ -369,3 +369,159 @@ Codex cloud 側のセットアップ（[Codex cloud](https://developers.openai.c
 - [Codex cloud](https://developers.openai.com/codex/cloud.md) / [Cloud environments](https://developers.openai.com/codex/environments/cloud-environment.md)
 - [Scheduled tasks](https://developers.openai.com/codex/automations.md)
 - [Documentation index (llms.txt)](https://developers.openai.com/codex/llms.txt)
+
+---
+
+# 追記（2026-07-26）— #22 の実機検証: 非対話レビューは成立するか
+
+**このセクションは [#22](https://github.com/Fumiya-Matsumoto/claude-agents/issues/22) の結果。** 本体（2026-07-25）が「クォータ消費なしでは確かめられない」として UNKNOWN で残した 3 件を実機で潰した。
+
+## 0. 測定条件
+
+- Codex CLI **0.145.0**、`model = "gpt-5.6-sol"` / `model_reasoning_effort = "high"`（`~/.codex/config.toml` の既定をそのまま使用）。
+- **消費実測**: `codex app-server` の `account/rateLimits/read` を実行前後で読む（消費ゼロ）。週次枠 `usedPercent` は **実行前 4% → 実行後 6%**。
+- **成功した review 実行は 4 回**（下記 run1〜run4c）。**≒ 0.5% / 回**。ほかに引数エラーで API 到達前に落ちた実行が 3 回（**消費ゼロ**）。
+- `~/.codex/config.toml` は**書き換えていない**。trust は `-c` でその実行限りに付与した。`.codex/agents/reviewer.toml` は作業ツリーに置いただけで**コミットせず、検証後に削除**した。
+
+| run | 対象 | 差分規模 | 終了コード | 所要 | 指摘 |
+|---|---|---|---|---|---|
+| run1 | `claude-agents` `--commit f6abd97` | 約 290 行 / 11 ファイル | **0** | 178s | P2 × 1 |
+| run2 | scratch `--commit 1c67380`（バグ仕込み） | 12 行 | **0** | 112s | P2 × 2 |
+| run3 | scratch `--commit e1e9373`（docstring のみ） | 4 行 | **0** | 28s | **0 件** |
+| run4c | scratch PROMPT のみ（サブエージェント名指し） | 12 行 | **0** | 182s | P1 × 1 + P2 × 1 |
+
+---
+
+## A. read-only + `approval_policy=never` は通る — **CONFIRMED(実機)**
+
+**本体 §6 が「実測が必要」とした最重要項目。結論: 通る。自動起動経路 (b) は死んでいない。**
+
+run1 で Codex が実行したシェルコマンドは **7 本すべて `exit=0` / `status=completed`**。承認要求は 1 度も発生せず、サンドボックス由来の失敗もゼロ。通ったもの:
+
+```
+git show / git log / git rev-parse / git remote / git status
+grep / find / sed / nl / cat / printf
+```
+
+→ ドキュメントの食い違い（`sandboxing.md`「承認なしにコマンド実行不可」vs `permissions.md`「読み取り系は許可」）は **`permissions.md` が正しい**。`sandboxing.md` の記述は非対話実行の実態と一致しない。
+
+**#18 への含意: 選択肢 (b) は消えない。** ただし下の B と C の条件が付く。
+
+## B. ネットワークはシェルでは遮断されるが、**MCP プラグインは素通りする** — **CONFIRMED(実機)**
+
+run1 で 2 つが同時に観測された:
+
+- Codex が実行した `gh issue view` は **`error connecting to api.github.com`** で失敗（`sandbox_workspace_write.network_access = false` と整合）。
+- **にもかかわらず、`codex_apps` MCP サーバの `github.fetch_issue` / `github.fetch_issue_comments` は成功し**、Issue **#3 / #6 / #7 / #8 / #9 / #10 / #11 / #12 / #13 の本文と全コメントを取得した**（`github@openai-curated` プラグインが有効なため）。
+
+**サンドボックスはモデルのシェルにしか掛かっていない。MCP ツールは別経路で、read-only でも外部通信する。** 「read-only にしたから外に出ない」は**誤り**。
+
+**#20 への含意（大きい）**: コンテキスト境界は `-c sandbox_mode=read-only` では引けない。Codex は指示していないのに**前マップ #3 の決定履歴を丸ごと読み込んだ**。渡す範囲を絞りたいなら、プラグインを切る（`-c plugins."github@openai-curated".enabled=false`）ほうを設計に入れる必要がある。
+
+## C. read-only は「リポジトリ内読み取り」ではなく **ディスク全体の読み取り** — **CONFIRMED(実機)**
+
+run1 で Codex はリポジトリ外を読んだ:
+
+- `/Users/fumiya/.codex/memories/MEMORY.md`（個人メモリ）
+- `/Users/fumiya/.agents/skills/code-review/SKILL.md`
+- `find` が親ディレクトリを走査し、**別プロジェクトのファイル名が出力に載った**（`../ui/CONTRIBUTING.md` / `../drgym/CLAUDE.md` / `../runup/AGENTS.md` / `../posuraku/CLAUDE.md` / `../tenakan/AGENTS.md`）。
+
+**マップの Notes は「Issue 本文にプロジェクト固有情報を書かない」を掲げているが、Codex 側はレビュー中に隣接リポジトリを覗ける。** 公開リポジトリのレビューに使う際の前提として記録しておく。`-C/--cd` や `--add-dir` は**書き込み側の制御**であって読み取りを閉じないことに注意。
+
+## D. 終了コードは「指摘の有無」を伝えない — **CONFIRMED(実機)。設計を 1 つ潰した。**
+
+本体 §2-3 が UNKNOWN とした核心。**答え: 区別できない。**
+
+| 状況 | 終了コード | 根拠 |
+|---|:--:|---|
+| レビュー実行成功・**指摘あり**（P1/P2 が出た） | **0** | run1 / run2 / run4c |
+| レビュー実行成功・**指摘なし** | **0** | run3（「no actionable defects」と明言して 0） |
+| preflight 失敗（git repo 外 等） | **1** | 本体 §2-3（既測） |
+| **CLI 引数エラー** | **2** | 本項で新規発見（下記 G） |
+
+→ **`codex exec review` の終了コードを CI ゲートに使うことはできない。** 「指摘が出たら落とす」は終了コードでは実装できず、**`-o` の出力本文をパースするしかない**。
+
+**#17 が導いた設計要件「非対話実行の終了コードとエラー文言を握りつぶさない」は、半分しか満たせない**: 「失敗した／起動できなかった」は終了コードで捕まえられるが、「指摘が出た」は捕まえられない。**#18 / #21 はこの前提で組む必要がある。**
+
+## E. 枠切れ時の終了コードは**実測していない** — **UNKNOWN（意図的に残す）**
+
+#17 の追記は「指摘あり / 実行失敗 / 枠切れ の 3 つを終了コードで区別できるか」まで見ることを求めていたが、**枠切れの実測は週次枠を 96% 燃やすことを意味する**ため実行しなかった。費用が発見の価値を大きく超える。
+
+ただし **D で既に判定に足りる**: 「指摘あり」と「指摘なし」が同じ 0 である以上、枠切れが 1 だろうが別値だろうが**ゲート設計は成立しない**。#17 が枠切れの重要度を上げた理由（サイレントフォールバックの排除）は本体 §2-3 とバイナリ解析で既に CONFIRMED であり、**新たに消費して確かめる必要はない**。
+
+## F. `--json` は消費量を返さない — **CONFIRMED(実機)**
+
+`turn.completed` イベントの `usage` は **全フィールド 0**:
+
+```json
+{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,
+ "cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}
+```
+
+→ **`codex exec review --json` からコストを読むことはできない。** #17 の「`exec --json` に rate-limit 出力は無い」を、review サブコマンドでも確認。**消費を測る手段は `codex app-server` の `account/rateLimits/read` 一本**（#17 §6）で変わらない。運用で消費を監視するなら、実行を挟んで前後 2 回読む形になる。
+
+## G. `[PROMPT]` は 3 つの対象指定フラグと**排他** — **CONFIRMED(実機)。新規発見。**
+
+```
+error: the argument '--commit <SHA>' cannot be used with '[PROMPT]'
+error: the argument '--base <BRANCH>'  cannot be used with '[PROMPT]'
+error: the argument '--uncommitted'    cannot be used with '[PROMPT]'
+```
+
+`codex exec review` は排他的な **4 モード**:
+
+1. `--commit <SHA>` 2. `--base <BRANCH>` 3. `--uncommitted` 4. `[PROMPT]`（散文で対象を説明する）
+
+→ **明示的な差分対象を指定しながら、レビュー観点を引数で渡すことはできない。** レビューの内容を形作る経路は以下に限られる:
+
+- `AGENTS.md` の **`## Code Review Rules`** 節（リポジトリにコミットして配布可）
+- `-c` による config 上書き
+- PROMPT モードに切り替える（ただし対象指定は散文になり、再現性が落ちる）
+
+**#20「レビュー用プロンプトの固定」への含意**: 対象を機械的に固定したいなら観点は `AGENTS.md` に置くしかない。両方を引数で渡す設計は取れない。
+
+なお引数エラーは **API 到達前に落ちるため消費ゼロ**。フラグの組み合わせ検証は無料で回せる。
+
+## H. サブエージェント（`.codex/agents/*.toml`）は `codex exec review` から起動できない — **CONFIRMED(実機)。本体 §3-3 の結論を否定する。**
+
+本体は `.codex/agents/reviewer.toml` を「**本命**」としたが、**この経路では効かない。**
+
+**静的証拠（消費ゼロ）:**
+- `codex` / `codex exec` / `codex exec review` の `--help` に **`--agent` / `--subagent` 相当のフラグは無い**。`codex agent` サブコマンドも無い。
+- `-p/--profile` は存在するが **`codex exec` にのみ**あり、**`codex exec review` には無い**。しかも参照先は `$CODEX_HOME/<name>.config.toml` で**ホーム限定**、リポジトリから配布できない。
+- バイナリ文字列上、サブエージェントは `<subagents>` として `collaboration_mode` 内のプロンプトに列挙される形。すなわち**委譲はプロンプト経由**の想定。
+
+**実機証拠（run4c）:** プロジェクトを `-c projects."...".trust_level="trusted"` で信頼させ、`.codex/agents/reviewer.toml` を置き、PROMPT で明示的に「`reviewer` サブエージェントに委譲し、その `developer_instructions` に厳密に従え」と指示した。結果:
+
+- `reviewer.toml` の `developer_instructions` に埋めた検証マーカー **`WF22-SUBAGENT-REVIEWER-RAN` は出力に 1 度も現れなかった**。
+- JSONL のイベント型は **`command_execution` と `agent_message` のみ**。委譲を示すイベントは**存在しない**。
+- Codex は `.codex/agents/reviewer.toml` を **`cat` で平文として読んだだけ**で、エージェント定義としては解釈も遵守もしなかった。
+
+→ **レビュアの model / effort / sandbox をサブエージェント定義で固定する設計は、`codex exec review` では成立しない。** 固定手段は **`-c` フラグの列挙**（`-m` / `-c model_reasoning_effort=...` / `-c sandbox_mode=...`）と **`AGENTS.md`** に限られる。**本体 §3-3 の「本命」判定は、`codex exec review` 経路に関しては誤り**として訂正する。
+
+（対話 TUI やデスクトップアプリでの委譲は本項の検証範囲外。否定しているのは **`codex exec review` からの名指し起動**のみ。）
+
+## I. 副次観測: レビュー品質と再現性
+
+- scratch に仕込んだ **`percentile(values, p=1)` の `IndexError`（`idx == len(s)`）を 2 回とも検出**した。指摘は具体的で、行番号も正確。
+- ただし**同一差分・同一設定でも優先度がぶれた**（run2 は P2、run4c は同じ欠陥を P1）。**優先度を閾値にした自動ゲートは不安定**になる。
+- run3（docstring 追加のみ）では**指摘を捏造せず 0 件で返した**。偽陽性を撒く挙動は観測されなかった。
+- run1 が claude-agents の実差分に付けた指摘は「README:78 の Sonnet 専用枠という前提が誤り」。**これは実際に正しい指摘**だが、`6bf453a` で既に修正済みの内容だった（Codex は `f6abd97..HEAD` を読んだうえでこう述べている）。
+
+---
+
+## この検証が #22 の受け入れ基準に対して返した答え
+
+| 受け入れ基準 | 結果 |
+|---|---|
+| 3 件が UNKNOWN でなくなっている | **達成**（1→A、2→D、3→H）。枠切れ終了コードのみ意図的に UNKNOWN（E に理由） |
+| 叩いたコマンドと生出力（終了コード込み）が記録されている | **達成**（§0 の表と各項） |
+| 1 件目が「通らない」だった場合に #18 の選択肢 (b) が消えることを明記 | **該当せず** — A で「**通った**」ため **(b) は消えない**。ただし B / C / D / G / H が (b) に条件を付ける |
+| 消費したクォータの実測値 | **達成** — 4 回で週次枠 **2%**（4%→6%）、**≒0.5% / 回** |
+| 記録は `research/codex-invocation` ブランチに追記 | **達成**（本追記） |
+
+## 消費の見立ての更新（#17 の数字を実測で締める）
+
+- #17 の推定「レビュー 1 回 ≒ 枠の 0.5〜1.5%」に対し、**実測は下限側の ≒0.5%**。
+- 内訳の傾向も #17 と整合: **大きい差分 + MCP による Issue 取得を伴う run1 が単独で ≒1%**、小さい scratch の 3 回で合計 ≒1%。**支配するのは投入コンテキスト量**であり、B の MCP 素通りが**そのまま消費増**に効いている。
+- 単純外挿で **週あたり 200 回前後**。#17 が置いた「1 日 5〜10 回」という保守的な線より**かなり余裕がある**。ただし週次枠は ChatGPT の Work / Excel とも共有される 1 本なので、対話利用と食い合う前提は変わらない。
