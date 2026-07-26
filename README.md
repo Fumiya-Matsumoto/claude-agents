@@ -26,6 +26,10 @@ auto-router (Opus) ── 必要な判断の質でタスクを 4 Tier に分類
                 ├─ frontier-solver (Fable)   真の難問のみ
                 ├─ test-runner (Sonnet)      検証
                 └─ frontier-reviewer (Fable) 独立レビュー
+
+  ※ 独立レビューが走るときは必ず、系列外の codex exec review (OpenAI Codex CLI)
+    を並行で同時起動する（起動点は auto-router の COMPLETION 節 /
+    frontier-orchestrator / orchestrator の 3 箇所。未導入でも壊れません）
 ```
 
 ### Tier 3 ゲート — 計画的 Fable と緊急 Fable の分離
@@ -42,12 +46,12 @@ Tier 3 に上がる前に、ルーターは不確実性の発生時点を判定�
 
 高リスク領域（DB スキーマ / マイグレーション・認証・認可・課金・セキュリティ・データ整合性・並行性・分散状態・不可逆な副作用・破壊的操作）はルータープロンプトで **1 本の列挙**として定義され、各 Tier がそれを参照します:
 
-| Tier | 高リスク領域に触れたとき |
-|---|---|
-| TIER 0 | 自分で扱わない（委譲する） |
-| TIER 1 | `quality-reviewer` (Opus) が独立レビュー ← 実装は Sonnet |
-| TIER 2 | `frontier-reviewer` (Fable) が独立レビュー ← 実装は Opus |
-| TIER 3 | かつ不確実性があるなら昇格 |
+| Tier | 高リスク領域に触れたとき | 系列外レビュー |
+|---|---|---|
+| TIER 0 | 自分で扱わない（委譲する） | — |
+| TIER 1 | `quality-reviewer` (Opus) が独立レビュー ← 実装は Sonnet | 並行で `codex exec review` |
+| TIER 2 | `frontier-reviewer` (Fable) が独立レビュー ← 実装は Opus | 並行で `codex exec review` |
+| TIER 3 | かつ不確実性があるなら昇格 | 並行で `codex exec review`（Tier 3 は全件） |
 
 規則は「**レビュアは実装者と別モデルであればよい**」1 本に収束します。Tier 2 で Fable を当てるのは危険度が理由ではなく、`deep-worker` (Opus) の実装を `quality-reviewer` (Opus) が見る**相関ブラインドスポット**を消すためです（モデル多様性は effort をいくら上げても買えない）。
 
@@ -57,6 +61,59 @@ Tier 3 に上がる前に、ルーターは不確実性の発生時点を判定�
 - 「自己申告が検証されていない」型は `test-runner` の**必須化**で閉じた。worker の `VERIFICATION:` は入力であって根拠ではない。適用を Tier 1 に限定せず委譲した実装成果すべて（Tier 1 / Tier 2）に広げたのは、Tier が「必要な判断の質」の軸であって検証の要否の軸ではないから ＋ Tier 1 だけ必須と書くと Tier 2 のほうが緩く読めるため（`quality-reviewer` は diff を読むのであってテスト実行を保証しない）
 - 残る「巻き添えで隣接を壊す」型だけが高リスク領域トリガーに値する。Tier 1 全件にレビューを課すと頻度がそのまま共通枠の消費になる
 - ルーター自身はレビュアに数えない。周辺コードを読めば Tier 1 の委譲理由（実装コンテキストを主セッションに持ち込まない）が死に、かつ受け入れ基準の執筆者はフレーミングの相関を持つ
+
+### 系列外レビュー（Codex）— 相関除去のための第 2 レビュア
+
+「レビュアは実装者と別モデル」で買っているのは能力差ではなく**相関の除去**です。ただし Opus も Fable も Anthropic 系列内にあり、系列そのものに由来する盲点は残ります。**OpenAI Codex CLI は系列外にある唯一の駒**なので、この構成が構造的に買えなかったものを供給できます。
+
+> **発火条件は新設しません。既存の独立レビューが走るときは、必ず Codex も走ります。**
+
+新しいトリガーも新しい設定キーも作らず、既存レビュアの発火条件に**寄生**します（カバー範囲は (Tier 1 ∧ 高リスク) ∨ (非自明な Tier 2) ∨ Tier 3 ∨ O ペインの高リスク PR ＝ `frontier-reviewer` / `quality-reviewer` が走るすべて）。ルーターに増える判断はゼロで、**通常の Tier 1 は対象外**のまま。起動点は寄生先の数だけあり、**3 箇所**です:
+
+| 起動点 | 寄生先 |
+|---|---|
+| `auto-router` の `COMPLETION` 節 | `quality-reviewer` / `frontier-reviewer`（Tier 1・Tier 2） |
+| `frontier-orchestrator` の `QUALITY GATE` | `frontier-reviewer`（Tier 3 全件。Fable が委譲し Fable がレビューする、最も相関の濃い場所） |
+| `orchestrator`（O ペイン）の共通ルール | `frontier-reviewer`（高リスク PR の検証） |
+
+- **足すのであって置き換えません。** `quality-reviewer` / `frontier-reviewer` は発火条件・担当・model/effort すべて無変更。理由は 3 つ — 検出能力の証拠がまだ薄い（同一差分でも指摘の優先度がぶれる実測がある）、Codex は MCP 経由で GitHub Issue を読むので**完全独立ではない**、`codex exec review` は diff レビュー専用ハーネスで `frontier-reviewer` の falsify 型レビューとは射程が違う
+- **「Claude 枠の節約」は根拠にしていません**（測定で反証済み。消費の 76% は主セッションで、レビュアは低頻度）。買っているのは相関除去だけです
+- **Claude レビュアと並行（同時起動）**。「Claude レビュアの指摘を Codex に見せない」がプロンプト規律ではなく**構造**で担保されます（レビュー時点で指摘がまだ存在しない）。同期実行の待ち時間もレビュア待ちに吸収されます
+- **往復はゼロ**。指摘を採用して直せば新しい完了サイクルになり、寄生規則で自然にもう 1 回だけ発火します。却下の記録も残しません（同じ差分を二度見ないため。同じ**型**の却下が繰り返されるなら、それは抑制対象ではなく規則側を直すシグナルなので `agents-feedback` に上げます）
+- **裁き手はルーター。ただし採用・却下とも全件を原文のまま完了報告に列挙**し、各件に `採用 / 却下（理由）` を付けます。「却下する動機を持つ側が裁く」問題を、裁定権の移転ではなく**可視性**で殺す設計です（人間は上訴審、通常時の摩擦はゼロ）
+- **失敗してもブロックしません**（枠切れ・CLI 未導入・実行失敗）。ただし黙って落ちず、完了報告に「系列外レビューは走らなかった（理由）」を必ず書きます
+
+#### 渡すもの / 伏せるもの — 境界は「出典」で引く
+
+| 出典 | 扱い |
+|---|---|
+| ユーザの原文の指示、元 Issue の受け入れ基準、再現手順、**失敗しているテストの生出力**、エラーログ | **渡す（原文引用・要約禁止）** |
+| ルーターの分類理由・Tier、原因の仮説、設計判断とその理由、worker の `VERIFICATION:`、**「全テスト通過」**、Claude レビュアの指摘、「レビュー済み」という事実 | **伏せる** |
+
+**受け入れ基準は渡します。** 伏せると「実装が要件を満たしていない」という最も価値の高い指摘が原理的に出なくなるためです（元 Issue の基準やユーザの原文は人間由来なので、系列内の閉路にはならない）。`test-runner` の扱いは**非対称**で、赤は生出力のまま渡し、緑は伏せます（「通っている」は探索を狭める最も強い暗示で、独立検証は既に済んでいるので情報として無価値）。**要約した瞬間に Claude のフレーミングが混ざる**ので要約は禁止です。
+
+**「伏せる」を担保するのは人間の規律でもプロンプト規律でもなく CLI フラグです。** 起動は `bin/codex-review`（install.sh が `~/.claude/bin/` へ symlink）1 本に集約し、フラグを毎回散文から書き起こさない形にしています:
+
+```bash
+codex exec review - \
+  --ignore-user-config \                # skills / memories / machine-local な model・effort を断つ
+  --ephemeral \                         # セッションを残さない
+  --disable apps \                      # MCP の裏口を閉じる（実測で確定）
+  -c sandbox_mode=read-only \
+  -c approval_policy=never \
+  -m gpt-5.6-sol \
+  -c model_reasoning_effort="xhigh" \
+  -o <出力先>
+```
+
+`--disable apps` が要る理由は実測です — **MCP プラグインはサンドボックスを素通りします**。付けない場合、read-only 実行でも Codex は GitHub の Issue を指示なしに読み込み（＝ Claude の推論成果物に接続し）、さらに**書き込み系ツール（Issue の更新・作成）まで生きています**。`--ignore-user-config` は skills / memories / `AGENTS.md` と machine-local な model・effort を断ちます。観点はすべてプロンプト本文に載るので、リポジトリ側に `AGENTS.md` 等を新設する必要はありません。
+
+**残存リスク（フラグでは閉じません）**:
+
+- `read-only` サンドボックスは**ディスク全体の読み取りを許します**。スクリプトのプロンプトは「リポジトリ外のファイルは読まないでください」と指示していますが、これは規律であって担保ではありません。機微なファイルを含むマシンでは、この点を承知のうえで使ってください
+- `--ignore-user-config` が読まないのは **`$CODEX_HOME/config.toml`（＝ユーザー設定）だけ**です。**レビュー対象のリポジトリが `.codex/config.toml` を持ち、そこに `mcp_servers` を定義している場合、その MCP は残る可能性があります**（未実測。このリポジトリ自身は `.codex/` を持たないので現時点の露出はありません）。プロジェクト側に MCP 定義を持つリポジトリでレビューを回す前に、実機で確認してください
+
+**未導入でも壊れません。** `codex` が無ければスクリプトは exit 127 で即座に降り、Claude レビュアだけが走ります（完了報告にその旨が明記されます）。
 
 ## エージェント一覧
 
@@ -72,6 +129,8 @@ Tier 3 に上がる前に、ルーターは不確実性の発生時点を判定�
 | frontier-orchestrator | Fable | xhigh | Tier 3 司令塔。Edit/Write なし、判断と委譲に専念 |
 | frontier-solver | Fable | xhigh | 正解自体が不明な難問のみ（低頻度） |
 | frontier-reviewer | Fable | xhigh | 高リスク変更の独立レビュー（falsify 指向） |
+
+`quality-reviewer` / `frontier-reviewer` による独立レビューが走る場面では、加えて**系列外の `codex exec review`（OpenAI Codex CLI・任意）が並行で走ります**。これは Claude のサブエージェントではないので frontmatter を持たず、この表には載りません（前節「系列外レビュー（Codex）」を参照）。
 
 モデル列は frontmatter の `model:` エイリアス（`sonnet` / `opus` / `fable` = それぞれ現行世代に解決される）。effort の配り方には 3 つの原則があります:
 
@@ -109,16 +168,19 @@ cd claude-agents
 
 1. `agents/*.md` を `~/.claude/agents/` へ **symlink**（既存の実ファイルは `.bak` 退避）
 2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
-3. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）。`"model"` / `"effortLevel"` が残っていれば削除を促す警告を出す（frontmatter と競合するため）
-4. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
+3. `bin/*` を `~/.claude/bin/` へ **symlink**（系列外レビューの起動スクリプト `codex-review`）
+4. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）。`"model"` / `"effortLevel"` が残っていれば削除を促す警告を出す（frontmatter と競合するため）
+5. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
+6. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
-symlink 方式なので、**更新は `git pull` だけ**で全マシンに反映されます。
+symlink 方式なので、**更新は `git pull` だけ**で全マシンに反映されます。ただし**配布物が増えたときだけは例外**で、`git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません。
 
 ### 前提
 
 - Claude Code（Fable 5 が利用できるプラン）
 - `jq`（settings.json の自動更新に使用。なければ手動追記の案内が出ます）
 - bash / zsh
+- **任意**: OpenAI Codex CLI（`codex`。系列外レビューに使用）。**未導入でも壊れません** — 系列外レビューがスキップされ、その旨が完了報告に明記されるだけです
 
 ### 推奨スキル（[mattpocock/skills](https://github.com/mattpocock/skills)）
 
@@ -175,7 +237,9 @@ Fable 5 には全面停止の実績があり（2026-06 に約 3 週間、輸出�
 
 **`effort: max` にする理由**: Fable は共通枠の 50% でハードキャップされているので、停止すればその消費が丸ごとゼロになり共通枠に余りが出ます。`max` の原資は停止で浮いた Fable 枠そのものです。
 
-**埋まらないのは多様性だけです。** 停止中は実装もレビューも Opus になり、相関ブラインドスポットが開きます。これは effort では買い戻せないので、**停止中は高リスク作業のレビューを人間が持ちます**。
+**多様性は Codex が引き継ぎます。** 停止中は実装もレビューも Opus になり、系列内の相関ブラインドスポットが開きます。これは effort では買い戻せませんが、退避しても `frontier-reviewer` は名前として生き残るため**寄生先は保たれ、系列外レビューはそのまま走り続けます**。従来ここには「停止中は高リスク作業のレビューを人間が持ちます」と書いていましたが、**撤回しました** — それは人間が起動するレーンであり、後述 (B) の「摩擦の不在には決して気づかない」がそのまま当たるからです（3 週間の停止中に毎回発火する保証がない）。**発火しない規則を自動で発火する規則に置き換えるのは、Codex が理想の人間レビュアより弱くても純粋な改善**です。**`codex` 未導入のマシンでは従来どおり人間が持ちます**（マシン単位の分岐は `codex` CLI の有無だけで、新規の設定は増やしていません）。
+
+**残るリスク**: Fable 停止中に Codex も枠切れすると、高リスクレビューの多様性がゼロになります（人間が持つ規則は撤回済み）。この二重障害の検知経路は、完了報告の「系列外レビューは走らなかった（理由）」の記述だけです。
 
 ### (B) レート制限に日常的に当たるとき — 予算のロールバック
 
@@ -195,6 +259,14 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 
 専用の監視機構は作りません。違和感は下記の `agents-feedback` ループにそのまま寄せます。
 
+### (D) Codex 側の値の陳腐化
+
+`bin/codex-review` が固定している `-m gpt-5.6-sol` と `-c model_reasoning_effort="xhigh"` は、**陳腐化する前提の値**です（モデル一覧には既に旧世代が並んでおり、このスラッグも同じ道を辿ります）。明示しているのは、CLI 既定が版ごとに動くとマシン間で実効値がズレるためです。
+
+**引退時の挙動は未検証**で、エラーになるのか**黙って別モデルに差し替えられる**のかが分かっていません（app-server に reroute イベントが存在するため）。ただし**どちらでも取るべき行動は「値を見直す」の一択**なので、ここに専用の監視経路は作らず、(B) の再調整と `agents-feedback` ループに合流させます。
+
+なお枠の残量とモデル一覧（＝固定した 2 値が今も有効か）は、`codex app-server` の JSON-RPC（`account/rateLimits/read` / `model/list`）で**消費ゼロ**で確認できます。
+
 ## フィードバックループ
 
 各マシンでの運用で得た知見（誤ルーティング・プロンプトの穴・摩擦）は、このリポジトリの **GitHub Issue（label: `feedback`）** に集約し、エージェント定義の改訂へ還元します。
@@ -209,6 +281,7 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 ```bash
 # symlink 削除
 find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete
+find ~/.claude/bin -type l -lname "$(pwd)/bin/*" -delete
 # settings.json から "agent" キーを削除
 jq 'del(.agent)' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
 # シェル rc から "# >>> claude-agents aliases >>>" 〜 "# <<< claude-agents aliases <<<" のブロックを削除

@@ -1,0 +1,12 @@
+# Claude Code のローカルセッション成果物。machine-local で配布しないもの。
+# settings.local.json は絶対パス（＝ホームディレクトリ名）を含み、
+# worktrees/ は埋め込みリポジトリなので、公開リポジトリには入れない。
+.claude/
+
+# オフライン時のフィードバック下書き。Issue 化して削除する一時ファイルで、
+# サニタイズ前の生の記述が残りうるため追跡しない（置き場の説明だけ追跡する）。
+feedback/*.md
+!feedback/README.md
+
+# macOS
+.DS_Store

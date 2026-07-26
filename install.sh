@@ -37,7 +37,23 @@ for d in "$REPO_DIR"/skills/*/; do
   echo "linked skill: ${name}"
 done
 
-# 3. settings.json に "agent": "auto-router" を設定
+# 3. 実行スクリプトを symlink（系列外レビューの起動口。既存の実ファイルは .bak 退避）
+BIN_DIR="${CLAUDE_DIR}/bin"
+mkdir -p "$BIN_DIR"
+for f in "$REPO_DIR"/bin/*; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  dest="${BIN_DIR}/${name}"
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    mv "$dest" "${dest}.bak.${STAMP}"
+    echo "backup: bin/${name} -> ${name}.bak.${STAMP}"
+  fi
+  chmod +x "$f"
+  ln -sf "$f" "$dest"
+  echo "linked bin: ${name}"
+done
+
+# 4. settings.json に "agent": "auto-router" を設定
 if command -v jq >/dev/null 2>&1; then
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "${SETTINGS}.bak.${STAMP}"
@@ -58,7 +74,7 @@ else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" を追加してください。'
 fi
 
-# 4. ペイン起動エイリアス
+# 5. ペイン起動エイリアス
 case "${SHELL##*/}" in
   zsh) RC="${HOME}/.zshrc" ;;
   *)   RC="${HOME}/.bashrc" ;;
@@ -76,6 +92,14 @@ EOF
   echo "aliases: ${RC} に追加しました（source ${RC} で有効化）"
 else
   echo "aliases: 設定済み（スキップ）"
+fi
+
+# 6. 系列外レビュー（任意）の前提を検出。未導入でも中断しない
+if command -v codex >/dev/null 2>&1; then
+  echo "codex: 検出しました（系列外レビューが有効になります）"
+else
+  echo 'ℹ codex CLI が見つかりません。系列外レビューはスキップされます（構成は壊れません）。'
+  echo '  導入すると、独立レビューが走る場面で系列外の第 2 レビュアが並行で走ります。'
 fi
 
 echo ""
