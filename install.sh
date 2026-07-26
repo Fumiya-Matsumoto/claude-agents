@@ -53,28 +53,83 @@ for f in "$REPO_DIR"/bin/*; do
   echo "linked bin: ${name}"
 done
 
-# 4. settings.json に "agent": "auto-router" を設定
+# 4. フックスクリプトを symlink（既存の実ファイルは .bak 退避）
+HOOKS_DIR="${CLAUDE_DIR}/hooks"
+mkdir -p "$HOOKS_DIR"
+for f in "$REPO_DIR"/hooks/*; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  dest="${HOOKS_DIR}/${name}"
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    mv "$dest" "${dest}.bak.${STAMP}"
+    echo "backup: hooks/${name} -> ${name}.bak.${STAMP}"
+  fi
+  chmod +x "$f"
+  ln -sf "$f" "$dest"
+  echo "linked hook: ${name}"
+done
+
+# 5. settings.json に "agent": "auto-router" を設定 ＋ Stop フックを冪等に登録
 if command -v jq >/dev/null 2>&1; then
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "${SETTINGS}.bak.${STAMP}"
-    tmp="$(mktemp)"
-    jq '.agent = "auto-router"' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    # 一時ファイルは settings.json と同じディレクトリに作る（$TMPDIR だと
+    # クロスデバイスになり得て mv のアトミック性が失われるため）
+    tmp="$(mktemp "${CLAUDE_DIR}/.settings.json.install.XXXXXX")"
+    if jq '.agent = "auto-router"' "$SETTINGS" > "$tmp"; then
+      mv "$tmp" "$SETTINGS"
+      echo 'settings.json: "agent": "auto-router" を設定'
+    else
+      rm -f "$tmp"
+      echo '⚠ settings.json への "agent" 設定に失敗しました（jq エラー）。手動で追加してください。'
+    fi
   else
     printf '{\n  "agent": "auto-router"\n}\n' > "$SETTINGS"
+    echo 'settings.json: "agent": "auto-router" を設定'
   fi
-  echo 'settings.json: "agent": "auto-router" を設定'
-  if jq -e 'has("model") or has("effortLevel")' "$SETTINGS" | grep -q true; then
+
+  # Stop フックへ claude-agents-strip-model.sh を追記登録する。既存の Stop
+  # エントリ（例: notify-stop.sh）や SessionStart フックは絶対に壊さない。
+  # コマンド文字列に claude-agents-strip-model.sh を含むかどうかで既存判定
+  # する（完全一致だと ~ 表記の手動登録と絶対パス登録が二重になるため）。
+  # 登録するコマンド自体は絶対パスで固定する（~ はフック実行シェルに
+  # よっては展開されないため）。`objects` で要素の型を絞り、Stop がオブ
+  # ジェクト形式だったり hooks 配列に文字列等が混入していても落ちないよう
+  # にする。
+  HOOK_CMD="bash ${HOOKS_DIR}/claude-agents-strip-model.sh"
+  tmp="$(mktemp "${CLAUDE_DIR}/.settings.json.install.XXXXXX")"
+  if jq --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" '
+    .hooks //= {} |
+    .hooks.Stop //= [] |
+    (
+      if ([.hooks.Stop[]? | objects | .hooks[]? | objects | .command? // empty] | any(contains($needle))) then
+        .
+      else
+        .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
+      end
+    )
+  ' "$SETTINGS" > "$tmp"; then
+    mv "$tmp" "$SETTINGS"
+    echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録（冪等）'
+  else
+    rm -f "$tmp"
+    echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+  fi
+
+  if jq -e 'has("model") or has("effortLevel")' "$SETTINGS" 2>/dev/null | grep -q true; then
     echo '⚠ settings.json に "model" / "effortLevel" キーが残っています。'
     echo '  これらはメインセッションで agents/*.md の frontmatter に勝つため、model / effort の'
     echo '  割当が settings.json（machine-local・配布されない）と frontmatter の 2 箇所に分裂します。'
-    echo '  このリポジトリは frontmatter を唯一の真実の源とする設計なので、削除を推奨します:'
+    echo '  このリポジトリは frontmatter を唯一の真実の源とする設計です。上で登録した Stop フックが'
+    echo '  次のターンの応答完了時に自動で剥がすので、通常は放置して構いません。すぐに消したい場合は:'
     echo "    jq 'del(.model, .effortLevel)' ${SETTINGS} > /tmp/s.json && mv /tmp/s.json ${SETTINGS}"
   fi
 else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" を追加してください。'
+  echo '  また Stop フックも手動登録が必要です（claude-agents-strip-model.sh を参照）。'
 fi
 
-# 5. ペイン起動エイリアス
+# 6. ペイン起動エイリアス
 case "${SHELL##*/}" in
   zsh) RC="${HOME}/.zshrc" ;;
   *)   RC="${HOME}/.bashrc" ;;
@@ -94,7 +149,7 @@ else
   echo "aliases: 設定済み（スキップ）"
 fi
 
-# 6. 系列外レビュー（任意）の前提を検出。未導入でも中断しない
+# 7. 系列外レビュー（任意）の前提を検出。未導入でも中断しない
 if command -v codex >/dev/null 2>&1; then
   echo "codex: 検出しました（系列外レビューが有効になります）"
 else
