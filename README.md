@@ -169,9 +169,10 @@ cd claude-agents
 1. `agents/*.md` を `~/.claude/agents/` へ **symlink**（既存の実ファイルは `.bak` 退避）
 2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
 3. `bin/*` を `~/.claude/bin/` へ **symlink**（系列外レビューの起動スクリプト `codex-review`）
-4. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）。`"model"` / `"effortLevel"` が残っていれば削除を促す警告を出す（frontmatter と競合するため）
-5. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
-6. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
+4. `hooks/*` を `~/.claude/hooks/` へ **symlink**（`settings.json` から `"model"` / `"effortLevel"` を剥がす `claude-agents-strip-model.sh`）
+5. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。`"model"` / `"effortLevel"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する
+6. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
+7. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
 symlink 方式なので、**更新は `git pull` だけ**で全マシンに反映されます。ただし**配布物が増えたときだけは例外**で、`git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません。
 
@@ -204,7 +205,7 @@ npx skills@latest add mattpocock/skills
 
 ### 注意
 
-- **model / effort の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`"effortLevel"` は次項のとおり frontmatter 側が発火しないため、置けば実質そこが唯一の指定手段になります。いずれにせよ両方に書くと割当が 2 箇所に分裂します。`settings.json` は machine-local で配布されないので、必ずマシン間でズレます。install.sh が検出して削除を促します（`"agent": "auto-router"` は維持）。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です
+- **model / effort の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`"effortLevel"` は次項のとおり frontmatter 側が発火しないため、置けば実質そこが唯一の指定手段になります。いずれにせよ両方に書くと割当が 2 箇所に分裂します。`settings.json` は machine-local で配布されないので、必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` / `"effortLevel"` を自動で剥がします（毎ターン走りますが、キーが無ければ何も書き込みません）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。このリポジトリと無関係なプロジェクトの既定モデルまで剥がされるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します。**既知の制限**: フック内部の jq 処理は jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください
 - **frontmatter の `effort` はメインセッションでは発火しないようです**（transcript の `effort` 記録ベースの観測: `settings.json` から `effortLevel` を削除した状態で `auto-router` の frontmatter を `effort: low` にしても、記録される effort は `high` のまま）。frontmatter の `model` は発火します（同条件で `model: sonnet` にすると `claude-sonnet-5` になる）。メインセッションで起動する 2 体（`auto-router` / `orchestrator`）はどちらも `effort: high` を意図しており、これは現在の既定値と一致するため実害はありませんが、**メインセッションの effort をリポジトリ側から制御する手段は現状ありません**（サブエージェント経路では frontmatter の `effort` が効きます）。値を変えたい場合は `ccd` と同じく起動時の `--effort` フラグで渡してください
 - auto-router に `tools:` 許可リストを**意図的に付けていません**。付けると MCP ツール・Skill・Workflow がメインセッションから使えなくなるためです（許可リストは排他的）。ルーティング規律はプロンプトで担保しています
 
@@ -279,11 +280,15 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 ## アンインストール
 
 ```bash
+# settings.json から "agent" キーと Stop フックの登録エントリを削除（symlink を
+# 先に消すと、切れた symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
+jq 'del(.agent) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
+  ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
 # symlink 削除
 find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete
+find ~/.claude/skills -type l -lname "$(pwd)/skills/*" -delete
 find ~/.claude/bin -type l -lname "$(pwd)/bin/*" -delete
-# settings.json から "agent" キーを削除
-jq 'del(.agent)' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
+find ~/.claude/hooks -type l -lname "$(pwd)/hooks/*" -delete
 # シェル rc から "# >>> claude-agents aliases >>>" 〜 "# <<< claude-agents aliases <<<" のブロックを削除
 ```
 
