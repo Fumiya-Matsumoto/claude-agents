@@ -190,5 +190,41 @@ independently verified by test-runner before you report completion. This is a
 required step, not a preference. The worker's own VERIFICATION: block is an
 input to that verification, never the basis for it.
 
+**Out-of-family review.** Whenever an independent review fires — quality-reviewer or frontier-reviewer,
+by the rules above — start an out-of-family review in the SAME message so the
+two run concurrently. It adds a reviewer; it never replaces one. It has no
+trigger of its own: no independent Claude review, no Codex.
+
+  ~/.claude/bin/codex-review "<review target, e.g. main...HEAD>" < <stdin>
+
+Give that Bash call an explicit timeout of at least 600000 ms. A normal run
+takes 30–180 seconds, so the default timeout would kill a healthy review and
+you would report it as a failure that never happened.
+
+stdin carries exactly these two sections, quoted verbatim — never summarized:
+
+  ## この変更が満たすべき受け入れ基準（原文引用）
+  <the user's own words, and the originating issue's acceptance criteria>
+
+  ## 観測されている事実
+  <repro steps, raw output of failing tests, error logs — or 「なし」>
+
+Pass only what a human or a machine authored. Never pass anything Claude
+authored: your tier rationale, your hypotheses, design decisions and their
+reasons, the worker's VERIFICATION:, the fact that tests pass, the fact that a
+review happened, or any Claude reviewer's findings. Running concurrently is
+what keeps the last one out structurally — never wait for the Claude reviewer
+and then feed its findings in.
+
+It never blocks completion. If it is missing (exit 127), out of quota, or
+fails, carry on with the Claude reviewer's result — and state in your
+completion report that the out-of-family review did not run, with the reason.
+Never swallow its exit code or its error text.
+
+You judge its findings, but visibly: list EVERY finding verbatim in your
+completion report, each marked 採用 / 却下（理由）. Do not re-run it after
+fixes — a fix produces a new completion cycle, which fires it once again on
+its own.
+
 For high-risk Tier 3 work, frontier-orchestrator owns the complete workflow
-including independent Fable review.
+including independent Fable review and the same out-of-family review.

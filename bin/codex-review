@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#
+# 系列外レビュー（R レーン）— OpenAI Codex CLI を独立レビュアとして 1 回だけ走らせる。
+#
+# 使い方:
+#   codex-review "<レビュー対象>" < <可変部>
+#
+#   引数    レビュー対象の指定（散文可）。例: "main...HEAD"、"直近コミット abc1234"、
+#           "未コミットの作業ツリー"
+#   stdin   PROMPT の可変 2 節を原文のまま。要約禁止。想定する形:
+#
+#             ## この変更が満たすべき受け入れ基準（原文引用）
+#             <ユーザの原文の指示 / 元 Issue の受け入れ基準>
+#
+#             ## 観測されている事実
+#             <再現手順 / 失敗しているテストの生出力 / エラーログ。無ければ「なし」>
+#
+#   出力    レビュー結果を stdout へ。失敗時は理由を stderr へ（握りつぶさない）。
+#   終了    0=走った（指摘の有無は伝えない。本文を読むこと） / 1=preflight 失敗 /
+#           2=引数エラー / 127=codex CLI 未導入（走っていない）
+#
+# 固定値の意味（すべて実測で確定。詳細は README「系列外レビュー（Codex）」節）:
+#   --ignore-user-config  skills / memories / AGENTS.md / machine-local な model・effort を断つ
+#   --ephemeral           セッションを残さない
+#   --disable apps        MCP の裏口を閉じる。これが「Claude 由来の文脈を伏せる」ことの担保
+#   -m / model_reasoning_effort  既定は CLI 版ごとに動きうるので必ず明示する。陳腐化する前提の 2 値
+#
+set -uo pipefail
+
+if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
+  echo "usage: codex-review \"<review target>\" < <acceptance criteria and observed facts>" >&2
+  exit 2
+fi
+
+TARGET="$1"
+
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex-review: SKIPPED — codex CLI が見つかりません（系列外レビューは走っていません）" >&2
+  exit 127
+fi
+
+VARIABLE="$(cat)"
+if [ -z "${VARIABLE//[[:space:]]/}" ]; then
+  echo "codex-review: 受け入れ基準と観測されている事実を stdin から渡してください（要約禁止）" >&2
+  exit 2
+fi
+
+OUT="$(mktemp -t codex-review.XXXXXX)"
+LOG="$(mktemp -t codex-review-log.XXXXXX)"
+trap 'rm -f "$OUT" "$LOG"' EXIT
+
+codex exec review - \
+  --ignore-user-config \
+  --ephemeral \
+  --disable apps \
+  -c sandbox_mode=read-only \
+  -c approval_policy=never \
+  -m gpt-5.6-sol \
+  -c model_reasoning_effort="xhigh" \
+  -o "$OUT" \
+  > "$LOG" 2>&1 << EOF
+以下の変更を、独立したレビュアとしてレビューしてください。
+
+## 対象
+${TARGET}
+
+${VARIABLE}
+
+## 依頼
+- 実装が上記の受け入れ基準を満たしていない箇所を指摘してください。基準自体が
+  不完全に見える場合は、それも指摘してください。
+- バグ・データ破壊・境界条件の見落としを優先して探してください。
+- 指摘には必ず \`ファイル:行\` を付けてください。
+- テストの実行は不要です（サンドボックスは read-only、ネットワークは遮断）。
+- リポジトリ外のファイルは読まないでください。
+- 指摘が無ければ「指摘なし」と明記してください。
+EOF
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "codex-review: FAILED (exit ${status}) — 系列外レビューは成立していません" >&2
+  tail -n 40 "$LOG" >&2
+  exit "$status"
+fi
+
+if [ -s "$OUT" ]; then
+  cat "$OUT"
+else
+  echo "codex-review: 出力が空です（exit 0 だが結果を取得できませんでした）" >&2
+  tail -n 40 "$LOG" >&2
+  exit 1
+fi
