@@ -94,6 +94,26 @@ resolve_symlink_chain() {
   printf '%s/%s\n' "$dir" "$(basename "$target")"
 }
 
+# 元ファイルのパーミッションを新しい settings.json へ引き継ぐ（mktemp は
+# 0600 で作るため、引き継がないと mv のたびに 0644 -> 0600 のラチェットが
+# 起きる）。hooks/claude-agents-strip-model.sh と同じ方式（GNU coreutils の
+# `-f` は `--file-system` と解釈されるため GNU の `stat -c` を先に試し、
+# BSD の `stat -f` へフォールバックする）で解決する。
+preserve_mode() {
+  local src="$1" dst="$2" mode
+  mode="$(stat -c '%a' "$src" 2>/dev/null || stat -f '%Lp' "$src" 2>/dev/null)"
+  case "$mode" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  chmod "$mode" "$dst" 2>/dev/null
+}
+
+# バックアップは常に元の（symlink 解決前の）パスに置く。$SETTINGS を実体
+# パスへ再代入した後だと、settings.json を dotfiles リポジトリで symlink
+# 管理しているユーザーのバックアップが dotfiles 実体ディレクトリ側に
+# untracked で増え続けてしまう（settings.json は秘密を含みうる）。
+SETTINGS_BACKUP="${CLAUDE_DIR}/settings.json.bak.${STAMP}"
+
 SETTINGS_DIR=""
 if resolved_settings="$(resolve_symlink_chain "$SETTINGS")"; then
   SETTINGS="$resolved_settings"
@@ -105,11 +125,12 @@ fi
 # 5. settings.json に "agent": "auto-router" を設定 ＋ Stop フックを冪等に登録
 if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
   if [ -f "$SETTINGS" ]; then
-    cp "$SETTINGS" "${SETTINGS}.bak.${STAMP}"
+    cp "$SETTINGS" "$SETTINGS_BACKUP"
     # 一時ファイルは settings.json の実体と同じディレクトリに作る（別デバイス
     # だと mv のアトミック性が失われるため）
     tmp="$(mktemp "${SETTINGS_DIR}/.settings.json.install.XXXXXX")"
     if jq '.agent = "auto-router"' "$SETTINGS" > "$tmp"; then
+      preserve_mode "$SETTINGS" "$tmp"
       mv "$tmp" "$SETTINGS"
       echo 'settings.json: "agent": "auto-router" を設定'
     else
@@ -142,6 +163,7 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
       end
     )
   ' "$SETTINGS" > "$tmp"; then
+    preserve_mode "$SETTINGS" "$tmp"
     mv "$tmp" "$SETTINGS"
     echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録（冪等）'
   else

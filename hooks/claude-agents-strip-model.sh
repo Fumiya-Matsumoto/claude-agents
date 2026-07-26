@@ -88,7 +88,14 @@ acquire_lock() {
   fi
   if [ -d "$LOCK" ]; then
     now="$(date +%s 2>/dev/null)" || return 1
-    lock_mtime="$(stat -f '%m' "$LOCK" 2>/dev/null || stat -c '%Y' "$LOCK" 2>/dev/null)"
+    # GNU coreutils の `stat -f` は `--file-system`（書式指定ではない）と
+    # 解釈されるため、GNU の `-c` を先に試す。BSD の `stat -c` は使い方を
+    # stderr に出して終了 1 になるだけで stdout を汚さないので、この順序
+    # なら両対応が成立する。
+    lock_mtime="$(stat -c '%Y' "$LOCK" 2>/dev/null || stat -f '%m' "$LOCK" 2>/dev/null)"
+    case "$lock_mtime" in
+      ''|*[!0-9]*) lock_mtime="" ;;
+    esac
     if [ -n "$lock_mtime" ] && [ $((now - lock_mtime)) -gt "$STALE_SECONDS" ]; then
       rmdir "$LOCK" 2>/dev/null
       mkdir "$LOCK" 2>/dev/null && return 0
@@ -116,8 +123,13 @@ jq_del_status=$?
 
 # 元ファイルのパーミッションを一時ファイルへ引き継ぐ（mktemp は 0600 で
 # 作るため、引き継がないと mv のたびに 0644 -> 0600 のラチェットが起きる）。
-# macOS(BSD) は `stat -f`、Linux(GNU) は `stat -c` なので両対応する。
-orig_mode="$(stat -f '%Lp' "$REAL_SETTINGS" 2>/dev/null || stat -c '%a' "$REAL_SETTINGS" 2>/dev/null)"
+# macOS(BSD) は `stat -f`、Linux(GNU) は `stat -c` なので両対応するが、GNU
+# の `-f` は `--file-system` と解釈されるため GNU の `-c` を先に試す
+# （上の lock_mtime と同じ理由）。
+orig_mode="$(stat -c '%a' "$REAL_SETTINGS" 2>/dev/null || stat -f '%Lp' "$REAL_SETTINGS" 2>/dev/null)"
+case "$orig_mode" in
+  ''|*[!0-9]*) orig_mode="" ;;
+esac
 [ -n "$orig_mode" ] && chmod "$orig_mode" "$tmp" 2>/dev/null
 
 # mv する前に検証する。1 つでも失敗したら mv せず、一時ファイルを消して
