@@ -69,13 +69,46 @@ for f in "$REPO_DIR"/hooks/*; do
   echo "linked hook: ${name}"
 done
 
+# settings.json は dotfiles 管理などで symlink になっているケースがある。
+# mv はリンクを辿らずリンク自体を置き換えてしまう（dotfiles 側の symlink が
+# 黙って切れる）ため、以降のステップは実体パスに対して行う。readlink -f は
+# macOS 標準では使えないため、hooks/claude-agents-strip-model.sh と同じ
+# 方式（plain な readlink でチェーンを手繰り、最後に `cd && pwd -P` で
+# 物理パスへ正規化）で解決する。解決できない場合（壊れた symlink 等）は
+# 警告した上でこのステップ全体をスキップする（対話的スクリプトなので
+# フックのように無言で降りない）。
+resolve_symlink_chain() {
+  local target="$1" link dir resolve_count=0
+  while [ -L "$target" ]; do
+    resolve_count=$((resolve_count + 1))
+    if [ "$resolve_count" -gt 20 ]; then
+      return 1
+    fi
+    link="$(readlink "$target" 2>/dev/null)" || return 1
+    case "$link" in
+      /*) target="$link" ;;
+      *)  target="$(dirname "$target")/${link}" ;;
+    esac
+  done
+  dir="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$target")"
+}
+
+SETTINGS_DIR=""
+if resolved_settings="$(resolve_symlink_chain "$SETTINGS")"; then
+  SETTINGS="$resolved_settings"
+  SETTINGS_DIR="$(dirname "$SETTINGS")"
+else
+  echo "⚠ ${SETTINGS} の実体パスを解決できませんでした（壊れた symlink 等）。settings.json の自動更新をスキップします。"
+fi
+
 # 5. settings.json に "agent": "auto-router" を設定 ＋ Stop フックを冪等に登録
-if command -v jq >/dev/null 2>&1; then
+if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "${SETTINGS}.bak.${STAMP}"
-    # 一時ファイルは settings.json と同じディレクトリに作る（$TMPDIR だと
-    # クロスデバイスになり得て mv のアトミック性が失われるため）
-    tmp="$(mktemp "${CLAUDE_DIR}/.settings.json.install.XXXXXX")"
+    # 一時ファイルは settings.json の実体と同じディレクトリに作る（別デバイス
+    # だと mv のアトミック性が失われるため）
+    tmp="$(mktemp "${SETTINGS_DIR}/.settings.json.install.XXXXXX")"
     if jq '.agent = "auto-router"' "$SETTINGS" > "$tmp"; then
       mv "$tmp" "$SETTINGS"
       echo 'settings.json: "agent": "auto-router" を設定'
@@ -97,7 +130,7 @@ if command -v jq >/dev/null 2>&1; then
   # ジェクト形式だったり hooks 配列に文字列等が混入していても落ちないよう
   # にする。
   HOOK_CMD="bash ${HOOKS_DIR}/claude-agents-strip-model.sh"
-  tmp="$(mktemp "${CLAUDE_DIR}/.settings.json.install.XXXXXX")"
+  tmp="$(mktemp "${SETTINGS_DIR}/.settings.json.install.XXXXXX")"
   if jq --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" '
     .hooks //= {} |
     .hooks.Stop //= [] |
@@ -122,8 +155,10 @@ if command -v jq >/dev/null 2>&1; then
     echo '  割当が settings.json（machine-local・配布されない）と frontmatter の 2 箇所に分裂します。'
     echo '  このリポジトリは frontmatter を唯一の真実の源とする設計です。上で登録した Stop フックが'
     echo '  次のターンの応答完了時に自動で剥がすので、通常は放置して構いません。すぐに消したい場合は:'
-    echo "    jq 'del(.model, .effortLevel)' ${SETTINGS} > /tmp/s.json && mv /tmp/s.json ${SETTINGS}"
+    echo "    tmp=\$(mktemp \"${SETTINGS_DIR}/.settings.json.XXXXXX\") && jq 'del(.model, .effortLevel)' ${SETTINGS} > \"\$tmp\" && mv \"\$tmp\" ${SETTINGS}"
   fi
+elif [ -z "$SETTINGS_DIR" ]; then
+  : # 実体パスを解決できなかった旨は上ですでに警告済み
 else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" を追加してください。'
   echo '  また Stop フックも手動登録が必要です（claude-agents-strip-model.sh を参照）。'

@@ -282,8 +282,22 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 ```bash
 # settings.json から "agent" キーと Stop フックの登録エントリを削除（symlink を
 # 先に消すと、切れた symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
+# settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らずリンク
+# 自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに一時
+# ファイルを作って書き戻す
+SETTINGS=~/.claude/settings.json
+target="$SETTINGS"
+while [ -L "$target" ]; do
+  link="$(readlink "$target")"
+  case "$link" in
+    /*) target="$link" ;;
+    *)  target="$(dirname "$target")/$link" ;;
+  esac
+done
+REAL_SETTINGS="$(cd "$(dirname "$target")" && pwd -P)/$(basename "$target")"
+tmp="$(mktemp "$(dirname "$REAL_SETTINGS")/.settings.json.uninstall.XXXXXX")"
 jq 'del(.agent) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
-  ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
+  "$REAL_SETTINGS" > "$tmp" && mv "$tmp" "$REAL_SETTINGS"
 # symlink 削除
 find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete
 find ~/.claude/skills -type l -lname "$(pwd)/skills/*" -delete
