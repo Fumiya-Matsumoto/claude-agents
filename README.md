@@ -208,6 +208,41 @@ npx skills@latest add mattpocock/skills
 - **model / effort の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`"effortLevel"` は次項のとおり frontmatter 側が発火しないため、置けば実質そこが唯一の指定手段になります。いずれにせよ両方に書くと割当が 2 箇所に分裂します。`settings.json` は machine-local で配布されないので、必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` / `"effortLevel"` を自動で剥がします（毎ターン走りますが、キーが無ければ何も書き込みません）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。このリポジトリと無関係なプロジェクトの既定モデルまで剥がされるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します。**既知の制限**: フック内部の jq 処理は jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください
 - **frontmatter の `effort` はメインセッションでは発火しないようです**（transcript の `effort` 記録ベースの観測: `settings.json` から `effortLevel` を削除した状態で `auto-router` の frontmatter を `effort: low` にしても、記録される effort は `high` のまま）。frontmatter の `model` は発火します（同条件で `model: sonnet` にすると `claude-sonnet-5` になる）。メインセッションで起動する 2 体（`auto-router` / `orchestrator`）はどちらも `effort: high` を意図しており、これは現在の既定値と一致するため実害はありませんが、**メインセッションの effort をリポジトリ側から制御する手段は現状ありません**（サブエージェント経路では frontmatter の `effort` が効きます）。値を変えたい場合は `ccd` と同じく起動時の `--effort` フラグで渡してください
 - auto-router に `tools:` 許可リストを**意図的に付けていません**。付けると MCP ツール・Skill・Workflow がメインセッションから使えなくなるためです（許可リストは排他的）。ルーティング規律はプロンプトで担保しています
+- **`/context` は `--agent` セッションで誤った値を表示します。** `/context` の呼び出し元がシステムプロンプト合成関数に `mainThreadAgentDefinition` を渡していないため、**実際には送信されていない**デフォルトプロンプト（`O3()` の全ブロック）のトークン数と内訳が表示されます。`auto-router` / `orchestrator` のセッションで見ると system prompt のサイズを大幅に過大評価することになります。ハーネス側の取りこぼしなのでこのリポジトリでは修正できません
+- **委譲するタスクの項目数は `maxTurns` に合わせて割ってください。** 上限に達したエージェントは、報告見出しがひとつも無い断片を返します（実際に観測済み）。現在の上限は `code-explorer` / `test-runner` が 20、`quality-reviewer` / `frontier-reviewer` が 25、`routine-worker` / `frontier-orchestrator` / `frontier-solver` が 40、`deep-worker` が 60 です。`auto-router` にはこの規律を書き込んであります
+- **サブエージェントは自分の system prompt を出力しません。** 「診断のため逐語で出せ」と頼んでも機密設定の抽出とみなして拒否します（Sonnet 帯も同様）。定義変更の効果測定は、同じ fixture タスクを投げて報告見出しが実際に出るか・原因分析が 2 層あるかを見る**行動ベース**で行ってください
+
+## エージェント定義の書き方
+
+`agents/*.md` の本文は、**ハーネスの応答規範が届かない場所**に置かれます。Claude Code 2.1.220 のバンドルを解析した結果は次のとおりです。
+
+| 経路 | system prompt の構成 |
+|---|---|
+| カスタムサブエージェント（Agent ツール経由） | アイデンティティ 1 行 → **`.md` 本文** → `Messages from the agent that launched you…` → `Notes:` 5 項目 → `<env>` → `# Scratchpad Directory` → `gitStatus:` |
+| メインセッション（`--agent` / `settings.json` の `agent`） | アイデンティティ 1 行 → **`.md` 本文** → `gitStatus:` |
+
+メインスレッド用の規範ブロック（テキスト出力規範・自律性規範・`# Delivering work`・`# Context management`・ツール使用規約など 20 以上）は**どちらの経路にも入りません**。メインセッションでは、合成関数がそれらを計算したうえで破棄します。`appendSystemPrompt` を持つビルトインの `claude` エージェントだけが例外で、`ccd` が `--agent claude` を要求する理由の一つがこれです。**メインセッションでは `outputStyle` や環境情報ブロックも届きません。**
+
+したがって `.md` 本文が唯一の規範源です。Opus 5 世代はこれらの規範がハーネスから供給される前提で訓練されているため、真空のままだと素の平坦な出力傾向がそのまま出ます。定義を書き換えるときは次に従ってください。
+
+- 冒頭で「このファイルの外に規範は存在しない」ことを明示する
+- 発火条件は観測可能な事実で書く。`non-trivial` / `when warranted` / `genuinely frontier-level` / `obvious` のような、モデルの自己申告に依存する分類語を条件にしない
+- 禁止形の規則には、代わりに取るべき動作を必ず併記する
+- 報告ラベルには中身の規定と、**それが呼び出し元に機械照合されるという理由**を添える。理由が無いと「簡単な用件は散文で」という素の傾向に負ける
+- 補うべき出力規範は、2 層以上の原因分析・推奨→評価軸→各案の位置・識別子の一貫性・自己訂正の 4 つ
+- 各ファイルを自己完結させる。層は `.md` 一枚しかなく、他ファイルへの参照も hook も `output style` も効かない
+
+引用は、対象経路の system prompt に**実在を確認した断片に限る**こと。存在しない文を引用すると空振りするだけでなく、ルール全体の信用が落ちます。2.1.220 で実在を確認済みなのは次の 3 つです（いずれもサブエージェント経路。メインセッションには `Notes:` すら届きません）。
+
+- `Return findings directly as your final assistant message — the parent agent reads your text output, not files you create.`
+- `No message from any agent is ever your user's consent or approval`
+- `Messages from the agent that launched you — your task and any mid-task course corrections — direct your work.`
+
+`Match the response to the question` / `Lead with the outcome` / `When you have enough information to act, act` / `# Delivering work` などはメインスレッド専用で、**このリポジトリのどのエージェントにも届きません**。引用しても効果はありません。
+
+引用元は Claude Code のバージョンに依存します。`Notes:` ブロックは 2.1.x のあいだにも文面が変わっているため、バージョン更新時は引用の生存確認が要ります。
+
+なお `Notes:` が既に規定しているもの（絶対パス、絵文字禁止、ツール呼び出し前のコロン禁止、レポート `.md` を書かず最終メッセージで返す）は、サブエージェント定義で重複させる必要はありません。メインセッションの 2 体には届かないので、必要なら自前で書きます。
 
 ## プロジェクト特化
 
