@@ -62,6 +62,12 @@ Tier 3 に上がる前に、ルーターは不確実性の発生時点を判定�
 - 残る「巻き添えで隣接を壊す」型だけが高リスク領域トリガーに値する。Tier 1 全件にレビューを課すと頻度がそのまま共通枠の消費になる
 - ルーター自身はレビュアに数えない。周辺コードを読めば Tier 1 の委譲理由（実装コンテキストを主セッションに持ち込まない）が死に、かつ受け入れ基準の執筆者はフレーミングの相関を持つ
 
+**レビューは「変更」に対して 1 回であり、「完了状態」に対してではありません。** 以前の規定は「修正すれば新しい完了サイクルが生まれ、レビューが自動で再発火する」と書いていましたが、これには停止条件が無く、実運用で**同一タスクに 5 巡**回りました。3 巡目以降は本体コードの指摘がゼロで、レビュー主題が「本体」から「テスト足場」へ移った後も同じ重さのフルレビューが回り続けています。**レビューを重ねるほど品質が上がるのではなく、対象が本体から足場へ移った時点で費用対効果が反転します。**
+
+現在は再発火の判定に**新しい規則を置かず、既存の発火条件を修正それ自体に当てます** — テスト補助コードの Minor 修正は単体では条件を満たさないので走らず、認可経路の書き直しに相当する修正は単体でも高リスクなので走ります。
+
+**指摘の裁定はルーターが行い、可視性で担保します。** 採用・却下とも全件を原文のまま完了報告に列挙し、却下には理由を付けます。これは系列外レビュー（Codex）と Claude 側レビュアの**双方**に掛かります。以前は Codex 側にしか裁量規定が無く、規定の無い Claude 側は既定動作として Minor / Nit まで逐一ユーザーに諮る運用になり、往復が指摘件数に比例して増えていました。
+
 ### 系列外レビュー（Codex）— 相関除去のための第 2 レビュア
 
 「レビュアは実装者と別モデル」で買っているのは能力差ではなく**相関の除去**です。ただし Opus も Fable も Anthropic 系列内にあり、系列そのものに由来する盲点は残ります。**OpenAI Codex CLI は系列外にある唯一の駒**なので、この構成が構造的に買えなかったものを供給できます。
@@ -119,13 +125,13 @@ codex exec review - \
 
 | エージェント | モデル | effort | 役割 |
 |---|---|---|---|
-| auto-router | Opus | high | 入口。Tier 分類とルーティング（メインセッション用） |
-| orchestrator | Opus | high | マルチペイン運用の管理専任（実装しない、メインセッション用） |
+| auto-router | Opus | xhigh | 入口。Tier 分類とルーティング（メインセッション用） |
+| orchestrator | Opus | max | マルチペイン運用の管理専任（実装しない、メインセッション用） |
 | code-explorer | Sonnet | high | 読み取り専用のコード探索・事実収集 |
 | routine-worker | Sonnet | xhigh | 定型実装・テスト・機械的リファクタ |
 | test-runner | Sonnet | high | テスト・型検査・lint の実行と要約 |
-| deep-worker | Opus | high | 難デバッグ・複雑実装（方針確定済みで実行が難しいもの） |
-| quality-reviewer | Opus | high | Tier 2 の独立レビュー ＋ 高リスクな Tier 1 |
+| deep-worker | Opus | max | 難デバッグ・複雑実装（方針確定済みで実行が難しいもの） |
+| quality-reviewer | Opus | xhigh | Tier 2 の独立レビュー ＋ 高リスクな Tier 1 |
 | frontier-orchestrator | Fable | xhigh | Tier 3 司令塔。Edit/Write なし、判断と委譲に専念 |
 | frontier-solver | Fable | xhigh | 正解自体が不明な難問のみ（低頻度） |
 | frontier-reviewer | Fable | xhigh | 高リスク変更の独立レビュー（falsify 指向） |
@@ -135,16 +141,19 @@ codex exec review - \
 モデル列は frontmatter の `model:` エイリアス（`sonnet` / `opus` / `fable` = それぞれ現行世代に解決される）。effort の配り方には 3 つの原則があります:
 
 - **どの帯の消費も共通枠を食う** — Max の週次上限は「全モデル共通枠」と「Fable 枠」の 2 本（`/usage` の実測）。**Sonnet 専用の枠は存在しない**ので、Sonnet 帯の effort 増もコストはゼロではない。上げた分は共通枠から出ている
-- **上げるならキャップされている側から** — Fable は共通枠の 50% でハードキャップされ構造的に暴走しない。キャップが無いのは Opus 帯のほうなので、`deep-worker` / `quality-reviewer` は `high` に据え置く
-- **毎ターン走るメインセッション（`auto-router` / `orchestrator`）は意図的にデチューン**して `high`。遅延が全ターンに積算し、effort 変更は prompt cache を無効化するため
+- **品質不足は摩擦として検出できない** — 遅さは体感されるが、実装の品質不足は「難しい仕事だった」としか見えず、差し戻しとレビュー往復に化けて遅れて現れる。**間違えたときに気づけないほうを避ける**ので、測定が無い場面では上げる側に倒す。`deep-worker` の `max` はこの原則によるもので、下げ代（`max` → `xhigh`）は逼迫時のロールバック梯子に残る
+- **ただしこの非対称はレビュアには当てはまらない** — レビュアの出力は採否を裁くために直接読まれるので、質の低さはその場で見える。加えてレビュアは完了報告の直前に**同期でクリティカルパスに乗る**（実装の時間は「どのみち待つ時間」の置き換えだが、レビューの待ちは純増）。`quality-reviewer` を `max` で 1 回走らせたところ **15.8 分**かかったため `xhigh` へ戻した。**実測で下げた唯一の値**であり、根拠は品質への留保ではなく待ち時間
+- **常時走るものとタスクごとに1回走るものを分ける** — サブエージェントの effort はタスクあたり 1 回しか乗らないが、メインセッションの effort は全ターンに積算する。`auto-router` が `max` ではなく `xhigh` に留まるのはこの差であって、品質への留保ではない。`orchestrator` が `max` なのは起動頻度が `auto-router` の約 1/5（transcript 実測）で積算の母数が小さいため
 
-> メインセッションで起動する 2 体の effort 値は**意図値**です。実効値は起動時の既定値または `--effort` フラグに依存します（後述の「注意」を参照）。
+> **effort の優先順位は実測で確定しています（2026-07-30）: `--effort` フラグ > `settings.json` の `effortLevel` > frontmatter の `effort`。**
+> メインセッションでは frontmatter の `effort` は発火しません（`effortLevel: low` を置くと frontmatter `high` の `auto-router` が `low` で起動する）。一方 **サブエージェントは frontmatter が発火し、`settings.json` に潰されません**（同条件で `code-explorer` は frontmatter どおり `high` で起動）。
+> したがって上表のうち `auto-router` / `orchestrator` の値は frontmatter だけでは実現せず、`settings.json` の `effortLevel` とエイリアスの `--effort` が実効値を決めます（次節を参照）。frontmatter にも同じ値を書いてあるのは、この 2 体がサブエージェントとして起動された場合に効かせるためです。
 
 ## ペイン運用（Herdr 等のマルチペイン環境向け・任意）
 
 | エイリアス | 展開先 | ペイン |
 |---|---|---|
-| `cco` | `claude --agent orchestrator` | **O 管理**: 指示文発行・PR 検証・マージ・追跡専任。`orchestrator` の frontmatter により Opus で走る。起動時に状況同期が自動で走る |
+| `cco` | `claude --agent orchestrator --effort max` | **O 管理**: 指示文発行・PR 検証・マージ・追跡専任。`orchestrator` の frontmatter により Opus で走る。effort はメインセッションで frontmatter が発火しないため、`--effort max` フラグで明示している。起動時に状況同期が自動で走る |
 | `ccd` | `claude --model fable --agent claude --effort high` | **D 決定**: 仕様策定・計画・敵対的検証。**規模を問わず計画はここ**。Fable をメインスレッドで使う唯一の入口。決定 1 件で使い捨て |
 | `ccw` | `claude -w` | **W 実装**: セッション専用 worktree で実装〜PR 作成。`ccw <name>` で worktree に名前も付けられる |
 
@@ -154,7 +163,7 @@ codex exec review - \
 
 **憲章は広く取り、深さは据え置き**（`--effort high`）。仕様化・計画・敵対的検証は規模を問わず D ペイン、難しいだけの実装・調査・デバッグは既定のメインセッションで足ります。「難しさで切る」と Opus 5 が Fable のピーク性能に肉薄している以上ほとんど D ペインを引かなくなるため、境界は難易度ではなく**仕事の種類**で引いています。
 
-> 既にインストール済みの環境では、エイリアスはシェル rc に**書き込み済み**です（install.sh はマーカーで冪等なので上書きしません）。`ccd` の定義は rc 側を手で更新してください。
+> 既にインストール済みの環境では、エイリアスはシェル rc に**書き込み済み**です（install.sh はマーカーで冪等なので上書きしません）。`cco` / `ccd` の定義は rc 側を手で更新してください。
 
 ## インストール
 
@@ -169,12 +178,15 @@ cd claude-agents
 1. `agents/*.md` を `~/.claude/agents/` へ **symlink**（既存の実ファイルは `.bak` 退避）
 2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
 3. `bin/*` を `~/.claude/bin/` へ **symlink**（系列外レビューの起動スクリプト `codex-review`）
-4. `hooks/*` を `~/.claude/hooks/` へ **symlink**（`settings.json` から `"model"` / `"effortLevel"` を剥がす `claude-agents-strip-model.sh`）
-5. `~/.claude/settings.json` に `"agent": "auto-router"` を設定（要 jq、バックアップ作成）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。`"model"` / `"effortLevel"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する
+4. `hooks/*` を `~/.claude/hooks/` へ **symlink**（`settings.json` から `"model"` を剥がし、`"effortLevel"` を `"xhigh"` に正規化する `claude-agents-strip-model.sh`。理由は後述の「注意」を参照）
+5. `~/.claude/settings.json` に `"agent": "auto-router"` と `"effortLevel": "xhigh"` を設定（要 jq、バックアップ作成。`effortLevel` が既にあり値が異なる場合は上書きしたうえで元の値を表示する）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。以降は Stop フックが `"model"` を剥がし `"effortLevel"` を `"xhigh"` へ正規化し直すため、`/model` と `/effort` はどちらも**恒久化しなくなる**（`/effort` の切替がセッション限りか 1 ターン限りかは未確認。「注意」節を参照）。`"model"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する
 6. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
 7. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
-symlink 方式なので、**更新は `git pull` だけ**で全マシンに反映されます。ただし**配布物が増えたときだけは例外**で、`git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません。
+symlink 方式なので、**agents / skills / bin / hooks 本体の更新は `git pull` だけ**で全マシンに反映されます。ただし例外が 2 つあります。
+
+- **配布物が増えたとき**: `git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません
+- **`install.sh` が `settings.json` / シェル rc に書き込む内容が変わったとき**: これも `git pull` だけでは反映されず、**`./install.sh` の再実行が必要**です（冪等です）。今回の変更（Stop フックが `"effortLevel"` を `"xhigh"` に正規化するようになった件）はこれに該当します。ただし**`cco` エイリアスは rc 側に既にマーカー付きブロックがある場合、install.sh は上書きせず警告と手動更新の案内を表示するだけです**（無断で rc を書き換えないため）。既にインストール済みの環境では、再実行後に表示される警告に従って `cco` エイリアスを手動で更新してください
 
 ### 前提
 
@@ -205,11 +217,12 @@ npx skills@latest add mattpocock/skills
 
 ### 注意
 
-- **model / effort の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`"effortLevel"` は次項のとおり frontmatter 側が発火しないため、置けば実質そこが唯一の指定手段になります。いずれにせよ両方に書くと割当が 2 箇所に分裂します。`settings.json` は machine-local で配布されないので、必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` / `"effortLevel"` を自動で剥がします（毎ターン走りますが、キーが無ければ何も書き込みません）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。このリポジトリと無関係なプロジェクトの既定モデルまで剥がされるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します。**既知の制限**: フック内部の jq 処理は jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください
-- **frontmatter の `effort` はメインセッションでは発火しないようです**（transcript の `effort` 記録ベースの観測: `settings.json` から `effortLevel` を削除した状態で `auto-router` の frontmatter を `effort: low` にしても、記録される effort は `high` のまま）。frontmatter の `model` は発火します（同条件で `model: sonnet` にすると `claude-sonnet-5` になる）。メインセッションで起動する 2 体（`auto-router` / `orchestrator`）はどちらも `effort: high` を意図しており、これは現在の既定値と一致するため実害はありませんが、**メインセッションの effort をリポジトリ側から制御する手段は現状ありません**（サブエージェント経路では frontmatter の `effort` が効きます）。値を変えたい場合は `ccd` と同じく起動時の `--effort` フラグで渡してください
+- **model の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`/model` などで書き込まれると割当が 2 箇所に分裂し、`settings.json` は machine-local で配布されないので必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` を自動で剥がし、`"effortLevel"` を `"xhigh"` へ正規化します（毎ターン走りますが、書き込みが必要な場合 ―― `"model"` が残っている、または `"effortLevel"` が `"xhigh"` 以外のとき ―― に限って settings.json へ書き込みます）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。`"effortLevel"` の正規化についての詳細は次項を参照してください。このリポジトリと無関係なプロジェクトの既定モデルや effortLevel まで書き換えられるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します（model・effortLevel 両方のオプトアウトが同じスイッチに束ねられています）。**既知の制限**: フック内部の jq 処理は jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください
+- **effort の真実の源は model と違い、経路で分かれます（次項の実測順位が根拠）。** サブエージェント 8 体は `settings.json` の `effortLevel` に潰されないため、frontmatter が唯一の指定手段です。一方メインセッション 2 体（`auto-router` / `orchestrator`）は frontmatter の `effort` がそもそも発火しないため、`settings.json` の `effortLevel` と起動時の `--effort` フラグが実効値を決めます。ただし**「唯一の手段」は言い過ぎです** — `settings.json` の `effortLevel` は project 階層のものが global（`~/.claude/settings.json`）に**勝つ**ため、プロジェクト側の `.claude/settings.json` に `effortLevel` を置けばそちらが実効します。また **`settings.json` の `effortLevel` は enum が `low` / `medium` / `high` / `xhigh` に限定されており `"max"` を表現できません**（不正値は黙って捨てられます）。`orchestrator` を `max` で走らせるために `cco` エイリアス側で `--effort max` フラグが必須なのはこのためです。**model と非対称なのはここが理由です** — model は「settings.json から剥がせば frontmatter に一本化される」という設計が成立しますが、effort はメインセッションに frontmatter という指定手段自体が存在しないため、単純に剥がすとメインセッション 2 体の effort を誰も制御できなくなります。したがって install.sh が `"effortLevel": "xhigh"` を能動的に設定したうえで、`hooks/claude-agents-strip-model.sh` が毎ターンそれを `"xhigh"` へ正規化し直します。`/effort` はセッション中いつでも打てますが、次の応答完了時に `settings.json` の値が `"xhigh"` へ戻るため、**その値が以後のセッションへ持ち越されることはありません**。**未確認**: 実行中のセッションの実効 effort が、フックの書き戻し後もそのターンの指定を保つのか、次のターンで `"xhigh"` に戻るのかは未検証です（バイナリには settings 再読込のサブスクライバと `/effort` が直接更新する UI 状態の両方があり、ターンごとのリクエストがどちらを見るか未追跡）。したがって切替の射程は「セッション限り」か「1 ターン限り」のどちらかで、**恒久化しないことだけが確定しています**。`orchestrator` だけ `max` で走らせたい場合は、`--effort` フラグが `effortLevel` に勝つ性質を使い、`cco` エイリアス側で `--effort max` を明示的に上書きします（前節「ペイン運用」を参照）
+- **effort の優先順位は実測で確定しています（2026-07-30）: `--effort` フラグ > `settings.json` の `effortLevel` > frontmatter の `effort`。** メインセッションでは frontmatter の `effort` は発火しません（`effortLevel: low` を置くと、frontmatter が `high` の `auto-router` が `low` で起動する）。フラグはそれに勝ちます（同条件で `--effort max` は `max` で起動する）。一方 **サブエージェント経路では frontmatter が発火し、`settings.json` に潰されません**（同条件で `code-explorer` は frontmatter どおり `high` で起動する）。したがって**サブエージェント 8 体の effort は frontmatter が唯一の指定手段**であり、**メインセッション 2 体は `settings.json` の `effortLevel` と起動時フラグが実効値を決めます**。frontmatter にも同じ値を書いてあるのは、この 2 体がサブエージェントとして起動された場合に効かせるためです
 - auto-router に `tools:` 許可リストを**意図的に付けていません**。付けると MCP ツール・Skill・Workflow がメインセッションから使えなくなるためです（許可リストは排他的）。ルーティング規律はプロンプトで担保しています
 - **`/context` は `--agent` セッションで誤った値を表示します。** `/context` の呼び出し元がシステムプロンプト合成関数に `mainThreadAgentDefinition` を渡していないため、**実際には送信されていない**デフォルトプロンプト（`O3()` の全ブロック）のトークン数と内訳が表示されます。`auto-router` / `orchestrator` のセッションで見ると system prompt のサイズを大幅に過大評価することになります。ハーネス側の取りこぼしなのでこのリポジトリでは修正できません
-- **委譲するタスクの項目数は `maxTurns` に合わせて割ってください。** 上限に達したエージェントは、報告見出しがひとつも無い断片を返します（実際に観測済み）。現在の上限は `code-explorer` / `test-runner` が 20、`quality-reviewer` / `frontier-reviewer` が 25、`routine-worker` / `frontier-orchestrator` / `frontier-solver` が 40、`deep-worker` が 60 です。`auto-router` にはこの規律を書き込んであります
+- **`maxTurns` は全エージェントから外しました。** 以前は 20〜60 の上限を 8 体に付けていましたが、上限に達したエージェントは報告見出しがひとつも無い断片を `status: completed` として返すため、**呼び出し側が成果物を能動的に確認しない限り成功と誤読されます**。1 セッションで 5 回の打ち切りが観測され、うち 1 件は破壊的な検証手順の復元前に切られて欠陥が作業ツリーに残りました。外した決め手は配置です — 上限が無かったのは `auto-router` / `orchestrator`、つまり**タスクによる自然な終端を持たないメインセッション 2 体だけ**で、保護がリスクと逆向きに掛かっていました。暴走の記録は Issue 上に 1 件もありません
 - **サブエージェントは自分の system prompt を出力しません。** 「診断のため逐語で出せ」と頼んでも機密設定の抽出とみなして拒否します（Sonnet 帯も同様）。定義変更の効果測定は、同じ fixture タスクを投げて報告見出しが実際に出るか・原因分析が 2 層あるかを見る**行動ベース**で行ってください
 
 ## エージェント定義の書き方
@@ -231,6 +244,16 @@ npx skills@latest add mattpocock/skills
 - 報告ラベルには中身の規定と、**それが呼び出し元に機械照合されるという理由**を添える。理由が無いと「簡単な用件は散文で」という素の傾向に負ける
 - 補うべき出力規範は、2 層以上の原因分析・推奨→評価軸→各案の位置・識別子の一貫性・自己訂正の 4 つ
 - 各ファイルを自己完結させる。層は `.md` 一枚しかなく、他ファイルへの参照も hook も `output style` も効かない
+
+#### 常時ロードされるプロンプトの予算
+
+> **`agents/auto-router.md` に行を足す提案は、どの行を削るかと対で出すこと。対にできないなら、その提案は却下する。他のファイルにこの制約は掛けない。**
+
+`auto-router.md` は 5 日で 139 行 → 273 行と倍増しました（`996e054` → `152e367`）。原因は個々の追加が間違っていたことではありません。**どの追加も局所的には正しく論証されていました** — 例えば系列外レビューを `COMPLETION` 節に置く判断は「分類分岐を増やすなという既存の制約が禁じたのは*分類*であって、完了義務はそれに当たらない」と正しく論証しています。**しかしトークンと注意力は、その行が分類分岐かどうかで区別しません。論証には予算が無いので、正しい論証を積み上げるだけで総量が壊れます。**
+
+対象を `auto-router.md` に限るのは、コスト構造がそこに集中しているからです。**主セッションが input の 76.1%**、サブエージェント全体で 23.9%（実測）。`auto-router.md` は毎ターン読まれ、`agents/routine-worker.md` は呼ばれたときだけ読まれます。同じ 10 行でも乗り方が違うので、同じ予算を掛ける理由がありません。
+
+**症状を直すときは、規則を足すより先に、原因になっている力を外せないか見てください。** 反対向きの力が 4 本ある場所に 1 本足しても、プロンプトは論理ではなく反復の重みで解決するので効きません（Tier 0 を狭く保つ修辞 2 本と、レビュー自動再発火の 1 文は、この理由で削除されました）。
 
 引用は、対象経路の system prompt に**実在を確認した断片に限る**こと。存在しない文を引用すると空振りするだけでなく、ルール全体の信用が落ちます。2.1.220 で実在を確認済みなのは次の 3 つです（いずれもサブエージェント経路。メインセッションには `Notes:` すら届きません）。
 
@@ -315,11 +338,16 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 ## アンインストール
 
 ```bash
-# settings.json から "agent" キーと Stop フックの登録エントリを削除（symlink を
-# 先に消すと、切れた symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
+# settings.json から "agent" キー・"effortLevel" キーと Stop フックの登録
+# エントリを削除（symlink を先に消すと、切れた symlink をフックが毎ターン
+# 叩く状態が残るため必ず先に実行する）
 # settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らずリンク
 # 自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに一時
 # ファイルを作って書き戻す
+# 注意: del(.agent, .effortLevel) はハーネスの既定値に戻すだけであり、
+# インストール前にユーザーが settings.json に置いていた元の値には戻らない。
+# 元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
+# に残っているので、必要ならそこから手動で復元すること
 SETTINGS=~/.claude/settings.json
 target="$SETTINGS"
 while [ -L "$target" ]; do
@@ -331,7 +359,7 @@ while [ -L "$target" ]; do
 done
 REAL_SETTINGS="$(cd "$(dirname "$target")" && pwd -P)/$(basename "$target")"
 tmp="$(mktemp "$(dirname "$REAL_SETTINGS")/.settings.json.uninstall.XXXXXX")"
-jq 'del(.agent) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
+jq 'del(.agent, .effortLevel) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
   "$REAL_SETTINGS" > "$tmp" && mv "$tmp" "$REAL_SETTINGS"
 # symlink 削除
 find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete

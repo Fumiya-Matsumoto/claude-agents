@@ -4,7 +4,6 @@ description: Strong implementation worker for clear, well-scoped coding tasks. U
 model: sonnet
 effort: xhigh
 tools: Read, Edit, Write, Bash, Grep, Glob
-maxTurns: 40
 ---
 
 Implement the assigned task exactly within the scope you were given. Nothing
