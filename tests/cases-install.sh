@@ -79,7 +79,12 @@ case_t33_install_quotes_hook_path() {
   run_install
   assert_eq "t33 終了ステータス" "$INSTALL_STATUS" "0"
   cmd="$(registered_hook_commands "$s")"
-  assert_contains "t33 パスがクォート/エスケープされている" "$cmd" '\ '
+  assert_eq "t33 シングルクォートで包まれている" \
+    "$cmd" "bash '${HOME}/.claude/hooks/claude-agents-strip-model.sh'"
+  # POSIX sh（bash 方言でないこと）でも解釈できること。printf %q は
+  # $'\346...' 形式を返しうるので、シングルクォート包みであることが要る
+  /bin/sh -c "$cmd" >/dev/null 2>&1
+  assert_eq "t33 POSIX sh でも実行できる" "$?" "0"
   # 実際に実行できること（= 登録された文字列がシェルで正しく解釈される）
   jq '.model = "fable"' "$s" > "${SANDBOX}/t33.json" && cp "${SANDBOX}/t33.json" "$s"
   eval "$cmd"
@@ -107,9 +112,88 @@ case_t34_install_upgrades_legacy_unquoted() {
   assert_eq "t34 終了ステータス" "$INSTALL_STATUS" "0"
   assert_contains "t34 修正した旨を表示する" "$INSTALL_OUT" "クォート付きに修正"
   assert_eq "t34 登録は 1 件のまま" "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "1"
-  assert_contains "t34 クォート付きになっている" "$(registered_hook_commands "$s")" '\ '
+  assert_eq "t34 クォート付きになっている" \
+    "$(registered_hook_commands "$s")" "bash '${HOME}/.claude/hooks/claude-agents-strip-model.sh'"
   run_install
   assert_contains "t34 3 回目はスキップ" "$INSTALL_OUT" "Stop フックは登録済み（スキップ）"
+}
+
+# legacy 差し替えが外科的であること。SessionStart・他の Stop エントリ・配列内の
+# 非オブジェクト要素を巻き込まないことを検証する（レビュー指摘 F8）。
+# ユーザーの手書きフック設定を落とす退行は、これが無いと緑のまま通る。
+case_t34b_legacy_replacement_is_surgical() {
+  local s legacy before_hooks after_hooks
+  export HOME="${SANDBOX}/Taro Yamada"
+  mkdir -p "$HOME"
+  s="${HOME}/.claude/settings.json"
+  run_install
+  legacy="bash ${HOME}/.claude/hooks/claude-agents-strip-model.sh"
+  jq --arg legacy "$legacy" '
+    .hooks = {
+      "SessionStart": [{"matcher":"","hooks":[{"type":"command","command":"bash ~/bin/session-start.sh"}]}],
+      "Stop": [
+        {"matcher":"","hooks":[{"type":"command","command":"bash ~/bin/notify-stop.sh"}]},
+        "junk-entry",
+        {"matcher":"","hooks":[{"type":"command","command":$legacy},{"type":"command","command":"bash ~/bin/also-me.sh"}]}
+      ]
+    }' "$s" > "${SANDBOX}/t34b.json" && cp "${SANDBOX}/t34b.json" "$s"
+  before_hooks="$(jq -S '.hooks' "$s")"
+  run_install
+  assert_eq "t34b 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t34b 修正した旨を表示する" "$INSTALL_OUT" "クォート付きに修正"
+  after_hooks="$(jq -S '.hooks' "$s")"
+  assert_eq "t34b SessionStart は不変" \
+    "$(printf '%s' "$after_hooks" | jq -S '.SessionStart')" \
+    "$(printf '%s' "$before_hooks" | jq -S '.SessionStart')"
+  assert_eq "t34b Stop の要素数は不変" \
+    "$(printf '%s' "$after_hooks" | jq '.Stop | length')" "3"
+  assert_eq "t34b 他の Stop エントリは不変" \
+    "$(printf '%s' "$after_hooks" | jq -S '.Stop[0]')" \
+    "$(printf '%s' "$before_hooks" | jq -S '.Stop[0]')"
+  assert_eq "t34b 配列内の非オブジェクト要素は不変" \
+    "$(printf '%s' "$after_hooks" | jq -r '.Stop[1]')" "junk-entry"
+  assert_eq "t34b 同じエントリ内の別コマンドは不変" \
+    "$(printf '%s' "$after_hooks" | jq -r '.Stop[2].hooks[1].command')" "bash ~/bin/also-me.sh"
+  assert_eq "t34b legacy コマンドだけがクォート付きになる" \
+    "$(printf '%s' "$after_hooks" | jq -r '.Stop[2].hooks[0].command')" \
+    "bash '${HOME}/.claude/hooks/claude-agents-strip-model.sh'"
+  # 差分は legacy コマンドの 1 文字列だけであることを、逆変換して確認する
+  assert_eq "t34b 変わったのはその 1 箇所だけ" \
+    "$(printf '%s' "$after_hooks" | jq -S --arg cmd "bash '${HOME}/.claude/hooks/claude-agents-strip-model.sh'" --arg legacy "$legacy" \
+        '(.Stop[2].hooks[0].command) |= (if . == $cmd then $legacy else . end)')" \
+    "$before_hooks"
+}
+
+# ---------------------------------------------------------------- 旧インストール
+
+# CLAUDE_CONFIG_DIR を使っている環境に ~/.claude 側の旧インストールが残っている
+# 場合、検出して警告するが削除はしない（ユーザー決定: 警告のみ）
+case_t35b_warns_about_legacy_install() {
+  local custom="${SANDBOX}/xdg/claude" legacy="${HOME}/.claude" ref="${SANDBOX}/ref.json"
+  mkdir -p "${legacy}/agents" "${legacy}/hooks"
+  ln -s "${REPO_DIR}/agents/auto-router.md" "${legacy}/agents/auto-router.md"
+  printf '%s\n' '{"agent":"auto-router","hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash '"${legacy}"'/hooks/claude-agents-strip-model.sh"}]}]}}' \
+    > "${legacy}/settings.json"
+  cp "${legacy}/settings.json" "$ref"
+  export CLAUDE_CONFIG_DIR="$custom"
+  run_install
+  unset CLAUDE_CONFIG_DIR
+  assert_eq "t35b 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t35b 旧インストールを知らせる" "$INSTALL_OUT" "旧インストールが残っています"
+  assert_contains "t35b symlink の本数を出す" "$INSTALL_OUT" "symlink 1 本"
+  assert_contains "t35b Stop 登録も挙げる" "$INSTALL_OUT" "settings.json の Stop フック登録"
+  assert_contains "t35b 外すと復活する旨を伝える" "$INSTALL_OUT" "黙って復活します"
+  assert_same_bytes "t35b 旧側の settings.json は変更しない" "${legacy}/settings.json" "$ref"
+  [ -L "${legacy}/agents/auto-router.md" ] || fail "t35b: 旧側の symlink を消してはいけない"
+}
+
+case_t35c_no_warning_without_legacy_install() {
+  local custom="${SANDBOX}/xdg/claude"
+  export CLAUDE_CONFIG_DIR="$custom"
+  run_install
+  unset CLAUDE_CONFIG_DIR
+  assert_eq "t35c 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_not_contains "t35c 旧インストールが無ければ警告しない" "$INSTALL_OUT" "旧インストールが残っています"
 }
 
 # 手動で ~ 表記で登録している場合は触らない（二重登録もしない）
@@ -298,6 +382,33 @@ case_t44_readme_uninstall_symlink_loop() {
     "$(ls -a "${HOME}/.claude" 2>/dev/null | grep -c 'settings.json.uninstall' | tr -d ' ')" "0"
   assert_eq "t44 symlink 削除は続行される" \
     "$(find "${HOME}/.claude/agents" -type l 2>/dev/null | wc -l | tr -d ' ')" "0"
+}
+
+# CLAUDE_CONFIG_DIR を設定している環境でも、settings.json だけでなく symlink 削除
+# まで追従すること（レビュー指摘 F6: 手順 1 だけが自動解決で、手順 2 の find は
+# ~/.claude 直書きだった。find は対象ゼロでも成功するので、symlink が全部残った
+# まま「成功したように見える」）
+case_t46_readme_uninstall_claude_config_dir() {
+  local custom="${SANDBOX}/xdg/claude" snippet="${SANDBOX}/uninstall.sh" status
+  export CLAUDE_CONFIG_DIR="$custom"
+  run_install
+  assert_eq "t46 install の終了ステータス" "$INSTALL_STATUS" "0"
+  if ! extract_uninstall_snippet "$snippet"; then
+    fail "t46: README からアンインストール手順を抽出できない"
+    unset CLAUDE_CONFIG_DIR
+    return
+  fi
+  assert_sandboxed_home
+  bash "$snippet" >"${SANDBOX}/uninstall.out" 2>"${SANDBOX}/uninstall.err"
+  status=$?
+  unset CLAUDE_CONFIG_DIR
+  assert_eq "t46 アンインストールの終了ステータス" "$status" "0"
+  assert_eq "t46 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
+  assert_eq "t46 agent が消える" "$(jq -r 'has("agent")' "${custom}/settings.json")" "false"
+  assert_eq "t46 Stop 登録が消える" "$(registered_hook_commands "${custom}/settings.json" | wc -l | tr -d ' ')" "0"
+  assert_eq "t46 CLAUDE_CONFIG_DIR 側の symlink が消える" \
+    "$(find "$custom" -type l 2>/dev/null | wc -l | tr -d ' ')" "0"
+  assert_contains "t46 消したものを表示する" "$(cat "${SANDBOX}/uninstall.out")" "auto-router.md"
 }
 
 # jq が失敗しても隠しファイルを残さない（README 版は残していた）

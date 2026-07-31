@@ -211,8 +211,12 @@ case_t15_gnu_stat_stub() {
   cat > "${stubs}/stat" <<EOF
 #!/usr/bin/env bash
 # GNU coreutils の stat を模したスタブ。-c だけを解し、-f は GNU と同じく
-# --file-system 扱いで失敗する。実処理は BSD stat に書式を変換して委譲する。
-echo "\$*" >> "${SANDBOX}/stat.log"
+# --file-system 扱いで失敗する。
+# 実処理は本物の stat へ委譲するが、その本物が GNU か BSD かで渡し方を変える。
+# 常に BSD 書式へ変換して -f で渡すと、GNU ホスト（Linux）では本物の stat が
+# -f を --file-system と解釈してこのスタブ自体が壊れる ―― GNU 経路を検証する
+# ためのテストが GNU 環境でだけ落ちる、という逆立ちになる。
+echo "\$1" >> "${SANDBOX}/stat.log"
 fmt=""
 args=()
 while [ \$# -gt 0 ]; do
@@ -224,6 +228,9 @@ while [ \$# -gt 0 ]; do
   esac
 done
 [ -n "\$fmt" ] || { echo "stat: no format" >&2; exit 1; }
+if [ "${REAL_STAT_IS_GNU}" = "yes" ]; then
+  exec "$REAL_STAT" -c "\$fmt" "\${args[@]}"
+fi
 fmt="\${fmt//%Y/%m}"
 fmt="\${fmt//%s/%z}"
 fmt="\${fmt//%a/%Lp}"
@@ -460,4 +467,120 @@ EOF
   assert_contains "t23 失敗を stderr に出す" "$HOOK_ERR" "claude-agents-strip-model"
   assert_same_bytes "t23 settings.json は元のまま" "$s" "$ref"
   assert_clean "t23" "${HOME}/.claude" "${HOME}/.claude"
+}
+
+# ---------------------------------------------------------------- 解放の TOCTOU
+
+# 保持時間が STALE_SECONDS を超えていたら、トークンが一致していても解放しない。
+# 照合と rm/rmdir はアトミックではないので、照合の直後に他人が stale 奪取して
+# 作り直したロックを消しうる（レビュー指摘 F1）。奪取は 60 秒より古いロックに
+# しか起きないので、「保持時間が短いこと」を確認できれば奪取されていないことが
+# 言える。
+#
+# 60 秒待たずに検証するため date をスタブ化する。変換 jq（＝ロック取得より後、
+# 解放より前）がマーカーを置き、それ以降の `date +%s` だけが 120 秒進んだ値を
+# 返す。呼び出し回数に依存しないので、フック側の date 呼び出し箇所が増減しても
+# 壊れない。
+case_t24_release_refuses_after_stale_threshold() {
+  local s="${HOME}/.claude/settings.json" lock="${HOME}/.claude/.strip-model.lock"
+  local stubs base real_date
+  write_settings "$s" "$DEFAULT_SETTINGS"
+  stubs="$(stub_dir)"
+  base="$(date +%s)"
+  real_date="$(command -v date)"
+  cat > "${stubs}/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "+%s" ] && [ -e "${SANDBOX}/timewarp" ]; then
+  echo "$((base + 120))"
+  exit 0
+fi
+exec "$real_date" "\$@"
+EOF
+  chmod +x "${stubs}/date"
+  cat > "${stubs}/jq" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in *"del(.model)"*) : > "${SANDBOX}/timewarp" ;; esac
+done
+exec "$REAL_JQ" "\$@"
+EOF
+  chmod +x "${stubs}/jq"
+  export PATH="${stubs}:${PATH}"
+  run_hook
+  export PATH="$ORIG_PATH"
+  assert_hook_ok "t24"
+  assert_eq "t24 書き込み自体は行われる" "$(jq -r 'has("model")' "$s")" "false"
+  assert_file_exists "t24 奪取されうる時刻を過ぎたら解放しない" "$lock"
+  assert_ne "t24 トークンは残したまま" "$(cat "${lock}/token" 2>/dev/null)" ""
+  rm -f "${lock}/token"; rmdir "$lock" 2>/dev/null
+}
+
+# stat で stale と判定してから mv するまでの間に $LOCK が別のディレクトリへ
+# 張り替わった場合、それは「生きたロック」でありうる（レビュー指摘 F2）。
+# mv 後に mtime と inode の組を確認して、掴んだものが違えば奪取を諦め、しかも
+# 相手の中身は壊さない。
+case_t25_steal_detects_relinked_lock() {
+  local s="${HOME}/.claude/settings.json" lock="${HOME}/.claude/.strip-model.lock"
+  local ref="${SANDBOX}/ref.json" stubs retired
+  write_settings "$s" "$DEFAULT_SETTINGS"
+  cp "$s" "$ref"
+  mkdir "$lock"
+  printf 'victim\n' > "${lock}/token"
+  touch -t 202001010000 "$lock"
+  stubs="$(stub_dir)"
+  cat > "${stubs}/stat" <<EOF
+#!/usr/bin/env bash
+# 本物の stat に委譲し、ロックディレクトリの stat に成功した最初の 1 回だけ、
+# その直後に「別プロセスが奪取して生きたロックを作り直した」状況へ差し替える
+out="\$("$REAL_STAT" "\$@" 2>/dev/null)"
+st=\$?
+last="\${!#}"
+if [ \$st -eq 0 ] && [ ! -e "${SANDBOX}/relinked" ]; then
+  case "\$last" in
+    *.strip-model.lock)
+      : > "${SANDBOX}/relinked"
+      rm -f "${lock}/token"
+      rmdir "${lock}"
+      mkdir "${lock}"
+      printf 'live-lock\n' > "${lock}/token"
+      ;;
+  esac
+fi
+[ \$st -eq 0 ] && printf '%s\n' "\$out"
+exit \$st
+EOF
+  chmod +x "${stubs}/stat"
+  export PATH="${stubs}:${PATH}"
+  run_hook
+  export PATH="$ORIG_PATH"
+  assert_hook_ok "t25"
+  assert_same_bytes "t25 ロックが取れないので書き込まない" "$s" "$ref"
+  retired="$(ls -d "${HOME}/.claude"/.strip-model.lock.stale.* 2>/dev/null | head -1)"
+  if [ -z "$retired" ]; then
+    fail "t25: 退避ディレクトリが無い（mv 自体が行われていない）"
+  else
+    assert_eq "t25 掴んだ生きたロックの中身を壊さない" "$(cat "${retired}/token" 2>/dev/null)" "live-lock"
+    rm -f "${retired}/token"; rmdir "$retired"
+  fi
+  rm -f "${lock}/token" 2>/dev/null; rmdir "$lock" 2>/dev/null
+}
+
+# 奪取の途中で SIGKILL された等で残った退避ディレクトリを回収する（F4）。
+# 年齢は名前に埋め込まれた epoch で判断するので、実行中の奪取（epoch が新しい）
+# は巻き込まない。
+case_t26_gc_collects_old_retired_lock() {
+  local s="${HOME}/.claude/settings.json" old new
+  write_settings "$s" "$DEFAULT_SETTINGS"
+  old="${HOME}/.claude/.strip-model.lock.stale.99999-$(( $(date +%s) - 600 ))-424242"
+  new="${HOME}/.claude/.strip-model.lock.stale.99998-$(date +%s)-131313"
+  mkdir "$old" "$new"
+  printf 'dead\n' > "${old}/token"
+  printf 'inflight\n' > "${new}/token"
+  run_hook
+  assert_hook_ok "t26"
+  assert_file_absent "t26 古い退避ディレクトリを回収する" "$old"
+  assert_file_exists "t26 実行中の奪取の退避先は消さない" "$new"
+  assert_eq "t26 実行中の奪取のトークンも消さない" "$(cat "${new}/token" 2>/dev/null)" "inflight"
+  assert_eq "t26 回収しても本来の処理は続く" "$(jq -r 'has("model")' "$s")" "false"
+  rm -f "${new}/token"; rmdir "$new"
 }

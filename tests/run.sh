@@ -23,6 +23,14 @@ INSTALL="${REPO_DIR}/install.sh"
 ORIG_PATH="$PATH"
 REAL_JQ="$(command -v jq || true)"
 REAL_STAT="$(command -v stat || true)"
+# 本物の stat が GNU coreutils か BSD か。GNU stat スタブ（t15）が本物へ委譲
+# するときの渡し方を変えるために使う（GNU ホストで -f を渡すと --file-system と
+# 解釈されてスタブ自体が壊れるため）
+if "$REAL_STAT" --version 2>/dev/null | grep -q GNU; then
+  REAL_STAT_IS_GNU=yes
+else
+  REAL_STAT_IS_GNU=no
+fi
 
 if [ -z "$REAL_JQ" ]; then
   echo "jq が必要です（テストは jq 前提のフックを検証する）" >&2
@@ -221,6 +229,9 @@ run_case t20 "生きたロック中は静かに諦める" case_t20_live_lock_blo
 run_case t21 "stale ロックは奪って続行し、退避先も片付ける" case_t21_stale_lock_is_stolen
 run_case t22 "並行 6 プロセス × 20 ラウンド" case_t22_concurrency
 run_case t23 "mv 失敗を握り潰さず、しかし非ゼロ終了しない" case_t23_mv_failure_is_reported
+run_case t24 "奪取されうる時刻を過ぎたら解放しない（解放の TOCTOU）" case_t24_release_refuses_after_stale_threshold
+run_case t25 "stat 後に張り替わったロックを掴んだら奪取を諦める" case_t25_steal_detects_relinked_lock
+run_case t26 "残った退避ディレクトリを回収する（実行中のものは残す）" case_t26_gc_collects_old_retired_lock
 
 echo "install.sh"
 run_case t30 "新規インストール" case_t30_install_fresh
@@ -228,7 +239,10 @@ run_case t31 "再実行が冪等で、登録済みは出し分ける" case_t31_i
 run_case t32 "CLAUDE_CONFIG_DIR を尊重する" case_t32_install_claude_config_dir
 run_case t33 "空白を含むホームでも登録コマンドが動く" case_t33_install_quotes_hook_path
 run_case t34 "クォート無しの旧登録を修正する" case_t34_install_upgrades_legacy_unquoted
+run_case t34b "旧登録の差し替えが他のフック設定を巻き込まない" case_t34b_legacy_replacement_is_surgical
 run_case t35 "手動の ~ 登録は触らない" case_t35_install_keeps_manual_registration
+run_case t35b "CLAUDE_CONFIG_DIR 環境の旧インストールを警告する（削除はしない）" case_t35b_warns_about_legacy_install
+run_case t35c "旧インストールが無ければ警告しない" case_t35c_no_warning_without_legacy_install
 run_case t36 "settings.json が symlink（絶対）でも実体に書く" case_t36_install_settings_symlink
 run_case t37 "settings.json が symlink（相対・多段）でも実体に書く" case_t37_install_settings_symlink_relative_chain
 run_case t38 "symlink ループでも警告して続行する" case_t38_install_settings_symlink_loop
@@ -241,6 +255,7 @@ echo "README（アンインストール手順）"
 run_case t43 "install → uninstall のラウンドトリップ" case_t43_readme_uninstall_roundtrip
 run_case t44 "symlink ループでハングせず中断する" case_t44_readme_uninstall_symlink_loop
 run_case t45 "jq 失敗時に隠しファイルを残さない" case_t45_readme_uninstall_broken_json
+run_case t46 "CLAUDE_CONFIG_DIR 環境で symlink 削除まで追従する" case_t46_readme_uninstall_claude_config_dir
 
 echo ""
 echo "pass ${PASS_COUNT} / fail ${FAIL_COUNT}"
