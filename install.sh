@@ -2,7 +2,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="${HOME}/.claude"
+# CLAUDE_CONFIG_DIR を尊重する（hooks/claude-agents-strip-model.sh と同じ既定）。
+# 無視すると、この環境変数を設定しているユーザーでは agents / skills / bin /
+# hooks も settings.json への書き込みも Claude Code が読まない場所に入り、
+# エラーも警告も出ないまま「導入したのに一度も動かない」状態になる。
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 AGENTS_DIR="${CLAUDE_DIR}/agents"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 STAMP="$(date +%Y%m%d%H%M%S)"
@@ -77,6 +81,12 @@ done
 # 物理パスへ正規化）で解決する。解決できない場合（壊れた symlink 等）は
 # 警告した上でこのステップ全体をスキップする（対話的スクリプトなので
 # フックのように無言で降りない）。
+#
+# この解決ロジックはフック本体と README のアンインストール手順にも同じ形で
+# 書かれている（3 箇所の重複）。共通スクリプトへ切り出さない理由は
+# hooks/claude-agents-strip-model.sh のコメントを参照（フックは symlink 経由で
+# 実行されるため、共通スクリプトを source するには自分自身の symlink 解決が
+# 必要になり、新しい壊れ方が増える）。3 箇所を触るときは 3 箇所とも直すこと。
 resolve_symlink_chain() {
   local target="$1" link dir resolve_count=0
   while [ -L "$target" ]; do
@@ -222,29 +232,86 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # よっては展開されないため）。`objects` で要素の型を絞り、Stop がオブ
     # ジェクト形式だったり hooks 配列に文字列等が混入していても落ちないよう
     # にする。
-    HOOK_CMD="bash ${HOOKS_DIR}/claude-agents-strip-model.sh"
-    tmp="$(mktemp_settings "$SETTINGS_DIR")"
-    if [ -z "$tmp" ]; then
-      echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。Stop フックの登録をスキップします。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
-    elif jq --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" '
-      .hooks //= {} |
-      .hooks.Stop //= [] |
-      (
-        if ([.hooks.Stop[]? | objects | .hooks[]? | objects | .command? // empty] | any(contains($needle))) then
-          .
-        else
-          .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
-        end
-      )
-    ' "$SETTINGS" > "$tmp"; then
-      preserve_mode "$SETTINGS" "$tmp"
-      mv "$tmp" "$SETTINGS"
-      hook_registered=1
-      echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録（冪等）'
-    else
-      rm -f "$tmp"
-      echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+    #
+    # パスはシェルに解釈されるコマンド文字列の中に埋め込まれるので、シェルの
+    # メタ文字を含む場合はクォートする。ホームディレクトリに空白を含む環境
+    # （/Users/Taro Yamada/...）だと `bash /Users/Taro` になり毎ターン失敗し、
+    # しかも settings.json に焼き付くので後から手で直す羽目になる。
+    # 空白等を含まない通常のパスはクォートしない ―― そうしておくと、既存
+    # 環境（クォート無しで登録済み）が state=current と判定されて無駄な
+    # 書き戻しが起きない。
+    quote_for_shell() {
+      local out
+      case "$1" in
+        # 英数字と _ . / - だけならシェルの解釈と一致するのでそのまま
+        *[!A-Za-z0-9_./-]*)
+          printf -v out '%q' "$1"
+          printf '%s\n' "$out"
+          ;;
+        *) printf '%s\n' "$1" ;;
+      esac
+    }
+    HOOK_PATH="${HOOKS_DIR}/claude-agents-strip-model.sh"
+    HOOK_CMD="bash $(quote_for_shell "$HOOK_PATH")"
+    # クォートが必要なパスなのに、過去の install.sh が書いたクォート無しの
+    # 文字列がそのまま残っている場合だけ、その 1 エントリを差し替える。
+    # 差し替え対象を「過去の install.sh が書いた形と完全一致」に限定するのは、
+    # ~ 表記の手動登録やユーザーが手を入れたエントリを書き換えないため。
+    LEGACY_HOOK_CMD="bash ${HOOK_PATH}"
+
+    # 既存判定を登録処理から切り離す。既に登録済みでも毎回「登録（冪等）」と
+    # 表示していたのを、エイリアス側と同様に出し分けるため。
+    # jq が落ちた場合・想定外の値を返した場合は "error" 扱いにして、書き込みを
+    # 一切せずに警告する（重複登録を避けるため、判定できないときは書かない）。
+    if ! hook_state="$(jq -r --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" --arg legacy "$LEGACY_HOOK_CMD" '
+      [(.hooks?.Stop? | arrays)[] | objects | (.hooks? | arrays)[] | objects | .command? // empty]
+      | if any(. == $cmd) then "current"
+        elif ($cmd != $legacy) and any(. == $legacy) then "legacy"
+        elif any(contains($needle)) then "current"
+        else "absent" end
+    ' "$SETTINGS" 2>/dev/null)"; then
+      hook_state="error"
     fi
+
+    case "$hook_state" in
+      current)
+        hook_registered=1
+        echo 'settings.json: Stop フックは登録済み（スキップ）'
+        ;;
+      absent|legacy)
+        tmp="$(mktemp_settings "$SETTINGS_DIR")"
+        if [ -z "$tmp" ]; then
+          echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。Stop フックの登録をスキップします。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+        elif jq --arg cmd "$HOOK_CMD" --arg legacy "$LEGACY_HOOK_CMD" --arg state "$hook_state" '
+          .hooks //= {} |
+          .hooks.Stop //= [] |
+          if $state == "legacy" then
+            .hooks.Stop |= map(
+              if type == "object" and (.hooks? | type) == "array" then
+                .hooks |= map(if type == "object" and .command == $legacy then .command = $cmd else . end)
+              else . end
+            )
+          else
+            .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
+          end
+        ' "$SETTINGS" > "$tmp"; then
+          preserve_mode "$SETTINGS" "$tmp"
+          mv "$tmp" "$SETTINGS"
+          hook_registered=1
+          if [ "$hook_state" = "legacy" ]; then
+            echo 'settings.json: Stop フックの登録コマンドをクォート付きに修正（パスに空白等が含まれるため、従来の登録は毎ターン失敗していました）'
+          else
+            echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録'
+          fi
+        else
+          rm -f "$tmp"
+          echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+        fi
+        ;;
+      *)
+        echo '⚠ Stop フックの登録状態を判定できませんでした（jq エラー等）。重複登録を避けるため settings.json は変更していません。手動で確認してください（claude-agents-strip-model.sh を参照）。'
+        ;;
+    esac
   fi
 
   # "model" 残留チェックは settings_writable の成否に関わらず行う（読み取り
@@ -265,7 +332,9 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
       echo '  Stop フックの登録ができていない（上の警告を参照）ため、次のターンでも自動では'
       echo '  剥がれません。手動で消してください:'
     fi
-    echo "    tmp=\$(mktemp \"${SETTINGS_DIR}/.settings.json.XXXXXX\") && jq 'del(.model)' ${SETTINGS} > \"\$tmp\" && mv \"\$tmp\" ${SETTINGS}"
+    # 案内するコマンドの中のパスもクォートする（Stop フック登録と同じ理由。
+    # ホームに空白がある環境でそのままコピペすると壊れるため）
+    echo "    tmp=\$(mktemp \"${SETTINGS_DIR}/.settings.json.XXXXXX\") && jq 'del(.model)' \"${SETTINGS}\" > \"\$tmp\" && mv \"\$tmp\" \"${SETTINGS}\""
   fi
 elif [ -z "$SETTINGS_DIR" ]; then
   : # 実体パスを解決できなかった旨は上ですでに警告済み
