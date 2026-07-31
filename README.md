@@ -388,11 +388,16 @@ cd /path/to/claude-agents
   fi
 )
 
-# 2. symlink 削除（CLAUDE_CONFIG_DIR を設定している場合は ~/.claude を読み替える）
-find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete
-find ~/.claude/skills -type l -lname "$(pwd)/skills/*" -delete
-find ~/.claude/bin -type l -lname "$(pwd)/bin/*" -delete
-find ~/.claude/hooks -type l -lname "$(pwd)/hooks/*" -delete
+# 2. symlink 削除。設定ディレクトリの決め方は手順 1 と同じ（CLAUDE_CONFIG_DIR が
+#    あればそちら）。-print を付けてあるのは、find が対象ゼロでも成功するため
+#    ―― 何も表示されなければ 1 本も消えていない（＝ cd 先が違う、または既に
+#    アンインストール済み）と分かるようにするため
+(
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  for sub in agents skills bin hooks; do
+    find "$CLAUDE_DIR/$sub" -type l -lname "$(pwd)/${sub}/*" -print -delete
+  done
+)
 
 # 3. シェル rc から "# >>> claude-agents aliases >>>" 〜 "# <<< claude-agents aliases <<<" のブロックを削除
 ```

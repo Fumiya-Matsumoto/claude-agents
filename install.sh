@@ -240,14 +240,20 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # 空白等を含まない通常のパスはクォートしない ―― そうしておくと、既存
     # 環境（クォート無しで登録済み）が state=current と判定されて無駄な
     # 書き戻しが起きない。
+    #
+    # クォートはシングルクォート包み + '\'' エスケープで行う。bash の
+    # `printf %q` は制御文字や非 ASCII に対して $'\346...' という bash 方言を
+    # 返すことがあり、登録したコマンドを POSIX sh（dash 等）が実行する構成だと
+    # 毎ターン失敗する（しかも settings.json に焼き付く）。シングルクォート包み
+    # なら全 POSIX sh で安全。
     quote_for_shell() {
-      local out
+      # 置換文字列を変数に組み立てる。"${1//\'/\'\\\'\'}" と直接書くと、二重
+      # 引用符の中では \' がバックスラッシュ + ' のまま残るため置換結果が
+      # 壊れる（実測: /a/b'c → '/a/b\'\\'\'c' となり sh が構文エラー）。
+      local sq="'" esc="'\\''"
       case "$1" in
         # 英数字と _ . / - だけならシェルの解釈と一致するのでそのまま
-        *[!A-Za-z0-9_./-]*)
-          printf -v out '%q' "$1"
-          printf '%s\n' "$out"
-          ;;
+        *[!A-Za-z0-9_./-]*) printf "'%s'\n" "${1//$sq/$esc}" ;;
         *) printf '%s\n' "$1" ;;
       esac
     }
@@ -401,6 +407,54 @@ if command -v codex >/dev/null 2>&1; then
 else
   echo 'ℹ codex CLI が見つかりません。系列外レビューはスキップされます（構成は壊れません）。'
   echo '  導入すると、独立レビューが走る場面で系列外の第 2 レビュアが並行で走ります。'
+fi
+
+# 8. CLAUDE_CONFIG_DIR を使っている環境で、~/.claude 側に残っている旧インストール
+#    を検出して知らせる。削除も削除の提案もしない（rc を無断で書き換えない先例に
+#    合わせる。旧側の settings.json にはユーザーが導入前から置いていた値が混ざり
+#    うるので、こちらの判断で消してよいものではない）。
+#    それでも黙ってはいけないのは、旧インストールが「Claude Code が読まないので
+#    無害」なのは CLAUDE_CONFIG_DIR が設定されている間だけで、後で外すと黙って
+#    復活するため。それを伝えられるのはこのタイミングしかない。
+LEGACY_DIR="${HOME}/.claude"
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$LEGACY_DIR" != "$CLAUDE_DIR" ] && [ -d "$LEGACY_DIR" ]; then
+  legacy_links=0
+  legacy_hook=0
+  for sub in agents skills bin hooks; do
+    for f in "${LEGACY_DIR}/${sub}"/*; do
+      # マッチしない場合はパターン文字列そのものが来るので -L で弾かれる
+      [ -L "$f" ] || continue
+      link_target="$(readlink "$f" 2>/dev/null || true)"
+      case "$link_target" in
+        "${REPO_DIR}"/*) legacy_links=$((legacy_links + 1)) ;;
+      esac
+    done
+  done
+  if [ -f "${LEGACY_DIR}/settings.json" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '[.hooks?.Stop? | arrays | .[] | objects | (.hooks? | arrays)[] | objects | .command? // empty]
+              | any(contains("claude-agents-strip-model.sh"))' \
+         "${LEGACY_DIR}/settings.json" >/dev/null 2>&1; then
+      legacy_hook=1
+    fi
+  fi
+  if [ "$legacy_links" -gt 0 ] || [ "$legacy_hook" -eq 1 ]; then
+    echo ''
+    echo "⚠ CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} を使っていますが、${LEGACY_DIR} 側にこのリポジトリの"
+    echo '  旧インストールが残っています:'
+    # set -e 下では `[ ... ] && echo` を単独文に置けない（テストが偽だと
+    # スクリプトごと落ちる）ので if で書く
+    if [ "$legacy_links" -gt 0 ]; then
+      echo "    - agents / skills / bin / hooks の symlink ${legacy_links} 本"
+    fi
+    if [ "$legacy_hook" -eq 1 ]; then
+      echo "    - settings.json の Stop フック登録（claude-agents-strip-model.sh）"
+    fi
+    echo '  Claude Code は CLAUDE_CONFIG_DIR 側しか読まないので、今は無害です。ただし後で'
+    echo '  CLAUDE_CONFIG_DIR の設定を外すと、この旧インストールが黙って復活します（古い agents 定義や'
+    echo '  古いパスの Stop フックが効き始めます）。'
+    echo '  こちらからは削除しません（旧側の settings.json には導入前からの設定が混ざりうるため）。'
+    echo '  不要なら README の「アンインストール」を CLAUDE_CONFIG_DIR を外した状態で実行してください。'
+  fi
 fi
 
 echo ""
