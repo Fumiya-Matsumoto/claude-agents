@@ -83,6 +83,16 @@ fi
 # 移植性が無い環境がある（macOS 標準ではフラグ非対応）ため、plain な
 # readlink でチェーンを手繰り、最後に `cd && pwd -P` でディレクトリ部分を
 # 物理パスへ正規化する。解決できなければ何もせず終了する。
+#
+# この解決ロジックは install.sh と README のアンインストール手順にも同じ形で
+# 書かれている（3 箇所の重複）。共通スクリプトへ切り出さないのは意図的で、
+# このフックは ~/.claude/hooks/ へ symlink として配布され「その symlink から」
+# 実行されるため、共通スクリプトを source するには自分自身の symlink を解決して
+# リポジトリ位置を突き止める必要があり、リポジトリの移動・削除で毎ターン
+# stderr を吐く新しい壊れ方を持ち込むから。README 側は対話シェルへコピペする
+# ワンライナーで、リポジトリが消えた後に実行されうるので同様に source できない。
+# 3 箇所を触るときは 3 箇所とも直すこと（tests/run.sh がフックと install.sh の
+# 双方について symlink の絶対 / 相対 / 多段 / ループ / 壊れを検証する）。
 target="$SETTINGS"
 resolve_count=0
 while [ -L "$target" ]; do
@@ -105,29 +115,71 @@ REAL_SETTINGS="${real_dir}/$(basename "$target")"
 # 片方の更新が黙って捨てられる。mkdir はアトミックなのでロックに使う。
 # stale lock 対策: プロセスが死んでロックが残ると以後フックが永久に無効化
 # されるので、一定時間（60 秒）より古いロックは奪って続行する。
+#
+# ロックの所有権はディレクトリ内のトークンファイルで表す。無条件に rmdir する
+# 実装だと、(a) 60 秒を超えて走った A の EXIT trap が、奪取した B のロックを
+# 解放してしまう、(b) A・B が同時に stale 判定 → A が奪って mkdir 成功 → 直後の
+# B の rmdir が A の新しいロックを消す、の 2 つで両者が同時にロックを持つ。
+# トークンを置くこと自体が rmdir の防壁にもなる（生きたロックは非空なので
+# 他人の rmdir は必ず ENOTEMPTY で失敗する）。
 LOCK="${CLAUDE_DIR}/.strip-model.lock"
+LOCK_TOKEN_FILE="${LOCK}/token"
+LOCK_TOKEN="$$-$(date +%s 2>/dev/null)-${RANDOM:-0}${RANDOM:-0}"
 STALE_SECONDS=60
 
+# mkdir で取り、トークンを書き、読み返して一致を確認する。読み返しまでやるのは
+# 「mkdir 直後・トークン書き込み前」に他人の release がこの空ディレクトリを
+# rmdir してしまう窓があるため（その場合トークンの書き込み自体が ENOENT で
+# 失敗するので、ここで気付いて諦められる）。
+try_lock() {
+  mkdir "$LOCK" 2>/dev/null || return 1
+  # 2>/dev/null を先に置く。リダイレクト自体が失敗したときのエラーは
+  # 「その時点までに適用済みの stderr」へ出るので、順序を逆にすると
+  # 毎ターン走るフックが stderr を漏らす（実測で確認）
+  printf '%s\n' "$LOCK_TOKEN" 2>/dev/null > "$LOCK_TOKEN_FILE" || return 1
+  [ "$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)" = "$LOCK_TOKEN" ] || return 1
+  return 0
+}
+
+# stale なロックを rename で奪う。$LOCK を直接 rmdir すると、その隙に他人が
+# 取り直した「生きたロック」を消してしまう（上記 (b)）。rename はアトミックで、
+# 同時に stale 判定した複数プロセスのうち成功するのは 1 つだけなので、奪取者が
+# 一意に決まる。奪った後は退避名の側だけを片付けるので、他人の新しいロックには
+# 触れない。
+steal_stale_lock() {
+  local now lock_mtime stale
+  # symlink を張られている場合は触らない（退避後の rm がリンク先の token を
+  # 消しうるため）
+  [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
+  now="$(date +%s 2>/dev/null)" || return 1
+  # GNU coreutils の `stat -f` は `--file-system`（書式指定ではない）と
+  # 解釈されるため、GNU の `-c` を先に試す。BSD の `stat -c` は使い方を
+  # stderr に出して終了 1 になるだけで stdout を汚さないので、この順序
+  # なら両対応が成立する。
+  lock_mtime="$(stat -c '%Y' "$LOCK" 2>/dev/null || stat -f '%m' "$LOCK" 2>/dev/null)"
+  case "$lock_mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ $((now - lock_mtime)) -gt "$STALE_SECONDS" ] || return 1
+  stale="${LOCK}.stale.${LOCK_TOKEN}"
+  mv "$LOCK" "$stale" 2>/dev/null || return 1
+  rm -f "${stale}/token" 2>/dev/null
+  rmdir "$stale" 2>/dev/null
+  return 0
+}
+
 acquire_lock() {
-  if mkdir "$LOCK" 2>/dev/null; then
-    return 0
-  fi
-  if [ -d "$LOCK" ]; then
-    now="$(date +%s 2>/dev/null)" || return 1
-    # GNU coreutils の `stat -f` は `--file-system`（書式指定ではない）と
-    # 解釈されるため、GNU の `-c` を先に試す。BSD の `stat -c` は使い方を
-    # stderr に出して終了 1 になるだけで stdout を汚さないので、この順序
-    # なら両対応が成立する。
-    lock_mtime="$(stat -c '%Y' "$LOCK" 2>/dev/null || stat -f '%m' "$LOCK" 2>/dev/null)"
-    case "$lock_mtime" in
-      ''|*[!0-9]*) lock_mtime="" ;;
-    esac
-    if [ -n "$lock_mtime" ] && [ $((now - lock_mtime)) -gt "$STALE_SECONDS" ]; then
-      rmdir "$LOCK" 2>/dev/null
-      mkdir "$LOCK" 2>/dev/null && return 0
-    fi
-  fi
-  return 1
+  try_lock && return 0
+  steal_stale_lock || return 1
+  try_lock
+}
+
+# 自分のトークンと一致するときだけ解放する（他人のロックを解放しない）。
+release_lock() {
+  [ "$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)" = "$LOCK_TOKEN" ] || return 0
+  rm -f "$LOCK_TOKEN_FILE" 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null
+  return 0
 }
 
 # ロック取得に失敗したら即座に諦める（次のターンで再試行されるので
@@ -137,14 +189,55 @@ acquire_lock || exit 0
 tmp=""
 # SIGTERM 等でフックがタイムアウト・強制終了されても一時ファイルとロックを
 # 残さない
-trap 'rm -f "$tmp" 2>/dev/null; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'rm -f "$tmp" 2>/dev/null; release_lock' EXIT
 trap 'exit 0' TERM INT
 
 # 一時ファイルは実体ファイルと同じディレクトリに作る（mv をアトミックに
 # するため）。作成に失敗したら何もせず終了する。
 tmp="$(mktemp "${real_dir}/.settings.json.strip-model.XXXXXX" 2>/dev/null)" || exit 0
 
-jq 'del(.model) | .effortLevel = "xhigh"' "$REAL_SETTINGS" > "$tmp" 2>/dev/null
+# compare-and-swap 用の指紋。上の mkdir ロックは strip-model フック同士しか
+# 調停しないので、jq で読み出してから mv するまでの間に Claude Code 本体
+# （`/config`・`/model`・`/effort` 等）が settings.json を書くと、その更新が
+# "model" 以外の任意のキーごと巻き戻る。読み出し「前」に指紋を取り、mv の
+# 直前に取り直して一致する場合だけ置き換える。
+#
+# 指紋は mtime（秒）・サイズ・inode の 3 つ。1 回の stat で取る。GNU の
+# `stat -f` は `--file-system` と解釈されるため GNU の `-c` を先に試す
+# （steal_stale_lock と同じ理由）。
+#
+# 取り逃すケース（この CAS の限界。ゼロにはできない）:
+#   - mtime の粒度が 1 秒までの環境（HFS+ 等）で、同一秒内に「サイズも inode も
+#     変えない」上書き（同じ長さの in-place 書き換え）が起きた場合。inode を
+#     見ているので、一時ファイル + rename で書くプロセス（Claude Code 本体・
+#     このフック自身）は同一秒・同一サイズでも検出できる。素の in-place 書き
+#     込みだけがこの穴に残る
+#   - 最後の stat から rename までの数マイクロ秒。POSIX に「指紋が一致する
+#     ときだけ rename する」アトミック操作は無いので、窓は狭められるだけで
+#     消えない
+#   - symlink チェーン自体の差し替え（実体パスは最初に解決したものを使い、
+#     mv 直前に再解決しない）
+# いずれも取り逃した場合の被害は従来と同じ（本体の更新が 1 回巻き戻る）で、
+# 巻き戻った側は次のターンに再適用されれば復旧する。
+fingerprint() {
+  local fp v
+  fp="$(stat -c '%Y %s %i' "$1" 2>/dev/null || stat -f '%m %z %i' "$1" 2>/dev/null)" || return 1
+  set -- $fp
+  [ $# -eq 3 ] || return 1
+  for v in "$@"; do
+    case "$v" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+  done
+  printf '%s\n' "$fp"
+}
+
+# 指紋が取れない環境（stat が無い等）では書き込みを諦める。CAS 無しで書くと
+# 本体の更新を黙って捨てうるので、安全側（何もしない）に倒す。
+fp_before="$(fingerprint "$REAL_SETTINGS")" || fp_before=""
+[ -n "$fp_before" ] || exit 0
+
+jq 'del(.model) | .effortLevel = "xhigh"' "$REAL_SETTINGS" 2>/dev/null > "$tmp"
 jq_transform_status=$?
 
 # 元ファイルのパーミッションを一時ファイルへ引き継ぐ（mktemp は 0600 で
@@ -172,7 +265,20 @@ if [ "$jq_transform_status" -eq 0 ] \
   && [ -s "$tmp" ] \
   && jq -e . "$tmp" >/dev/null 2>&1 \
   && jq -e 'has("agent")' "$tmp" >/dev/null 2>&1; then
-  mv "$tmp" "$REAL_SETTINGS"
+  # compare-and-swap: 読み出し時点から実体が変わっていたら諦める（本体の
+  # 書き込みを巻き戻さない）。諦めても次のターンのフックが再試行するので
+  # 実害は無い。
+  fp_now="$(fingerprint "$REAL_SETTINGS")" || fp_now=""
+  if [ -n "$fp_now" ] && [ "$fp_now" = "$fp_before" ]; then
+    # mv の失敗（権限・別デバイス等）は放置すると永久に気付かれないので
+    # stderr に 1 行出す。非ゼロ終了はしない（セッションの応答完了を
+    # 壊さないため）。一時ファイルは EXIT trap が片付ける。
+    if ! mv "$tmp" "$REAL_SETTINGS" 2>/dev/null; then
+      printf '%s\n' "claude-agents-strip-model: ${REAL_SETTINGS} の更新に失敗しました（権限・マウント状態を確認してください）" >&2
+    fi
+  else
+    rm -f "$tmp"
+  fi
 else
   rm -f "$tmp"
 fi
