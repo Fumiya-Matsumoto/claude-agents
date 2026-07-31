@@ -120,63 +120,177 @@ REAL_SETTINGS="${real_dir}/$(basename "$target")"
 # 実装だと、(a) 60 秒を超えて走った A の EXIT trap が、奪取した B のロックを
 # 解放してしまう、(b) A・B が同時に stale 判定 → A が奪って mkdir 成功 → 直後の
 # B の rmdir が A の新しいロックを消す、の 2 つで両者が同時にロックを持つ。
-# トークンを置くこと自体が rmdir の防壁にもなる（生きたロックは非空なので
-# 他人の rmdir は必ず ENOTEMPTY で失敗する）。
+#
+# ただしトークンの照合だけでは足りない。照合と削除はアトミックではないので、
+# 「照合に成功した直後に奪取されて作り直された」ロックを消しうる（check と act
+# の間の TOCTOU）。取得・奪取・解放のいずれも、パス名 $LOCK ではなく「自分が
+# 触ったそのディレクトリ」を指していることを別の手段で確かめる必要がある。
+# 解放側は時間で（release_lock の論証）、奪取側は mtime と inode の組で
+# （steal_stale_lock）確かめる。
 LOCK="${CLAUDE_DIR}/.strip-model.lock"
 LOCK_TOKEN_FILE="${LOCK}/token"
+# トークンは <pid>-<epoch>-<乱数>。gc_stale_locks が退避ディレクトリの年齢を
+# 名前だけから判断するので、この並び順に依存がある。
 LOCK_TOKEN="$$-$(date +%s 2>/dev/null)-${RANDOM:-0}${RANDOM:-0}"
 STALE_SECONDS=60
+# 解放時に確保しておく余裕（下の release_lock の論証を参照）。
+RELEASE_GRACE_SECONDS=5
+LOCK_ACQUIRED_AT=""
 
-# mkdir で取り、トークンを書き、読み返して一致を確認する。読み返しまでやるのは
-# 「mkdir 直後・トークン書き込み前」に他人の release がこの空ディレクトリを
-# rmdir してしまう窓があるため（その場合トークンの書き込み自体が ENOENT で
-# 失敗するので、ここで気付いて諦められる）。
-try_lock() {
-  mkdir "$LOCK" 2>/dev/null || return 1
-  # 2>/dev/null を先に置く。リダイレクト自体が失敗したときのエラーは
-  # 「その時点までに適用済みの stderr」へ出るので、順序を逆にすると
-  # 毎ターン走るフックが stderr を漏らす（実測で確認）
-  printf '%s\n' "$LOCK_TOKEN" 2>/dev/null > "$LOCK_TOKEN_FILE" || return 1
-  [ "$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)" = "$LOCK_TOKEN" ] || return 1
+now_epoch() {
+  local now
+  now="$(date +%s 2>/dev/null)" || return 1
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$now"
+}
+
+# ロックディレクトリの mtime と inode を 1 回の stat で取る。GNU coreutils の
+# `stat -f` は `--file-system`（書式指定ではない）と解釈されるため、GNU の
+# `-c` を先に試す。BSD の `stat -c` は使い方を stderr に出して終了 1 になる
+# だけで stdout を汚さないので、この順序なら両対応が成立する。
+lock_stat() {
+  local out
+  out="$(stat -c '%Y %i' "$1" 2>/dev/null || stat -f '%m %i' "$1" 2>/dev/null)" || return 1
+  set -- $out
+  [ $# -eq 2 ] || return 1
+  case "${1}${2}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s %s\n' "$1" "$2"
+}
+
+# 奪取の途中（rename 成功後・rmdir 前）に SIGKILL されると退避ディレクトリが
+# 残る。回収経路がどこにも無いと設定ディレクトリ（dotfiles 管理下でありうる）に
+# ゴミが溜まり続けるので、書き込み経路に入るたびに古い退避ディレクトリを回収する。
+#
+# 年齢の判定にディレクトリの mtime を使わないのは、退避ディレクトリが奪われた側の
+# 古い mtime をそのまま引き継ぐため（rename は mtime を更新しない）。mtime で
+# 判定すると、実行中の奪取 ―― steal_stale_lock が再検証している最中のもの ――
+# まで消してしまう。名前に埋め込まれた epoch は奪取者の起動時刻なので、実行中の
+# ものは必ず新しく、誤って回収されない。
+gc_stale_locks() {
+  local now d suffix stamp
+  now="$(now_epoch)" || return 0
+  for d in "${LOCK}".stale.*; do
+    # マッチしない場合はパターン文字列そのものが来るので -d で弾かれる
+    [ -d "$d" ] || continue
+    suffix="${d##*.stale.}"
+    stamp="${suffix#*-}"
+    stamp="${stamp%%-*}"
+    case "$stamp" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ $((now - stamp)) -gt "$STALE_SECONDS" ] || continue
+    rm -f "${d}/token" 2>/dev/null
+    rmdir "$d" 2>/dev/null
+  done
   return 0
 }
 
+# mkdir で取り、トークンを書き、読み返して一致を確認する。読み返しまでやるのは
+# 「mkdir 直後・トークン書き込み前」に他人がこの空ディレクトリを rmdir して
+# しまう窓があるため（その場合トークンの書き込み自体が ENOENT で失敗するので、
+# ここで気付いて諦められる）。
+try_lock() {
+  local started cur
+  # 時刻は mkdir より前に読む。$LOCK の mtime は mkdir 以降にしか進まないので
+  # started <= mtime($LOCK) が保証され、release_lock の保持時間の見積りが
+  # 「実際の年齢以上」に出る側（安全側）へ倒れる。
+  started="$(now_epoch)" || return 1
+  mkdir "$LOCK" 2>/dev/null || return 1
+  LOCK_ACQUIRED_AT="$started"
+  # 2>/dev/null を先に置く。リダイレクト自体が失敗したときのエラーは
+  # 「その時点までに適用済みの stderr」へ出るので、順序を逆にすると
+  # 毎ターン走るフックが stderr を漏らす（実測で確認）
+  if printf '%s\n' "$LOCK_TOKEN" 2>/dev/null > "$LOCK_TOKEN_FILE" \
+    && [ "$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)" = "$LOCK_TOKEN" ]; then
+    return 0
+  fi
+  # 途中で失敗した。作りかけのディレクトリを残すと、以後 STALE_SECONDS の間
+  # 誰もロックを取れなくなる（奪取で自己回復はするが 60 秒無効化される）ので
+  # 片付ける。自分が mkdir した直後であり、奪取は 60 秒より古いロックにしか
+  # 起きないので、ここで消してよいのは自分のディレクトリだけだと言える。
+  # それでも中身が他人のトークンだった場合（想定外）は触らない。
+  cur="$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)"
+  if [ -z "$cur" ] || [ "$cur" = "$LOCK_TOKEN" ]; then
+    rm -f "$LOCK_TOKEN_FILE" 2>/dev/null
+    rmdir "$LOCK" 2>/dev/null
+  fi
+  LOCK_ACQUIRED_AT=""
+  return 1
+}
+
 # stale なロックを rename で奪う。$LOCK を直接 rmdir すると、その隙に他人が
-# 取り直した「生きたロック」を消してしまう（上記 (b)）。rename はアトミックで、
-# 同時に stale 判定した複数プロセスのうち成功するのは 1 つだけなので、奪取者が
-# 一意に決まる。奪った後は退避名の側だけを片付けるので、他人の新しいロックには
-# 触れない。
+# 取り直した「生きたロック」を消してしまう（上記 (b)）。
+#
+# rename がアトミックであることが保証するのは「同じディレクトリを奪い合った
+# 複数プロセスのうち成功するのは 1 つだけ」までで、「掴んだものが stale だった
+# あのディレクトリである」ことは保証しない ―― stat してから mv するまでの間に、
+# 元の stale が誰かに回収され、別プロセスが $LOCK に生きたロックを作りうる。
+# そこで mv の後に退避先を stat し直し、mtime と inode の組が stat 時点と一致
+# することを確認する。退避名は自分のトークン入りで他者が構築しないパスなので、
+# この再検証は競合しない。inode 番号は rmdir 後に再利用されうるが、作り直された
+# ロックの mtime は必ず現在時刻なので、組で見れば区別できる。
 steal_stale_lock() {
-  local now lock_mtime stale
+  local now before after stale
   # symlink を張られている場合は触らない（退避後の rm がリンク先の token を
   # 消しうるため）
   [ -d "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
-  now="$(date +%s 2>/dev/null)" || return 1
-  # GNU coreutils の `stat -f` は `--file-system`（書式指定ではない）と
-  # 解釈されるため、GNU の `-c` を先に試す。BSD の `stat -c` は使い方を
-  # stderr に出して終了 1 になるだけで stdout を汚さないので、この順序
-  # なら両対応が成立する。
-  lock_mtime="$(stat -c '%Y' "$LOCK" 2>/dev/null || stat -f '%m' "$LOCK" 2>/dev/null)"
-  case "$lock_mtime" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ $((now - lock_mtime)) -gt "$STALE_SECONDS" ] || return 1
+  now="$(now_epoch)" || return 1
+  before="$(lock_stat "$LOCK")" || return 1
+  set -- $before
+  [ $((now - $1)) -gt "$STALE_SECONDS" ] || return 1
   stale="${LOCK}.stale.${LOCK_TOKEN}"
   mv "$LOCK" "$stale" 2>/dev/null || return 1
+  after="$(lock_stat "$stale")" || return 1
+  if [ "$after" != "$before" ]; then
+    # 生きたロックを掴んでしまった。中身は壊さずそのまま残し、gc_stale_locks
+    # に回収させる（掴まれた側の release_lock は $LOCK にトークンが無いので
+    # 何もしない）。ロックは取れていないので呼び出し側は降りる。
+    return 1
+  fi
   rm -f "${stale}/token" 2>/dev/null
   rmdir "$stale" 2>/dev/null
   return 0
 }
 
 acquire_lock() {
+  gc_stale_locks
   try_lock && return 0
   steal_stale_lock || return 1
   try_lock
 }
 
-# 自分のトークンと一致するときだけ解放する（他人のロックを解放しない）。
+# 自分のトークンと一致し、かつ「まだ奪取されうる時刻に達していない」ときだけ
+# 解放する。トークン照合だけでは、照合に成功した直後に奪取されて作り直された
+# ロックを rm/rmdir で消してしまう（check と act の間の TOCTOU）。
+#
+# なぜ時間の確認で TOCTOU が閉じるか:
+#   - $LOCK が他人に奪われるのは、その他人が now - mtime($LOCK) > STALE_SECONDS
+#     を観測したときだけ（steal_stale_lock 以外に $LOCK を消す経路は無い）
+#   - mtime($LOCK) は自分が取得した時刻で、取得後こちらは $LOCK を触らない。
+#     さらに LOCK_ACQUIRED_AT は mkdir より前に読んだ時刻なので
+#     LOCK_ACQUIRED_AT <= mtime($LOCK)。したがって
+#     now - LOCK_ACQUIRED_AT >= now - mtime($LOCK) で、こちらの見積りは実際の
+#     年齢以上（安全側）になる
+#   - 解放の直前に now - LOCK_ACQUIRED_AT <= STALE_SECONDS - RELEASE_GRACE_SECONDS
+#     を確認できたなら、この瞬間まで誰も奪取条件を満たしていない。かつ奪取条件が
+#     成立するのは最短でも RELEASE_GRACE_SECONDS 秒後なので、続く rm と rmdir の
+#     2 システムコールにはそれだけの猶予がある
+#   - 超えていた場合は「奪われていないこと」を保証できないので、何もせずに降りる。
+#     放置したロックは次に来た誰かが stale として回収するので詰まらない
+#   （前提: date +%s が単調に進むこと。時計が飛べば奪取側の判定も同じだけずれる。
+#     経過時間が負になった場合も保証が崩れるので何もしない）
 release_lock() {
+  local now age
+  [ -n "$LOCK_ACQUIRED_AT" ] || return 0
   [ "$(cat "$LOCK_TOKEN_FILE" 2>/dev/null)" = "$LOCK_TOKEN" ] || return 0
+  now="$(now_epoch)" || return 0
+  age=$((now - LOCK_ACQUIRED_AT))
+  [ "$age" -ge 0 ] || return 0
+  [ "$age" -le $((STALE_SECONDS - RELEASE_GRACE_SECONDS)) ] || return 0
   rm -f "$LOCK_TOKEN_FILE" 2>/dev/null
   rmdir "$LOCK" 2>/dev/null
   return 0
