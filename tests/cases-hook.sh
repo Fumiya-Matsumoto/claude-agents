@@ -565,6 +565,83 @@ EOF
   rm -f "${lock}/token" 2>/dev/null; rmdir "$lock" 2>/dev/null
 }
 
+# 取得側の TOCTOU（レビュー指摘 FF1）: mkdir 成功直後に長時間停止すると、その間に
+# 他人が空ディレクトリを奪取して自分のロックを作りうる。再開後のトークン書き込みは
+# 他人のディレクトリ内の他人のトークンを上書きし、読み返しは自分の値と一致して
+# 「成功」してしまう。読み返しでは検出できないので、書き込み・読み返しの後に
+# 時間上界を確認し、超えていたら取得を成功として扱わない。
+#
+# date スタブは「1 回だけ」120 秒進む。トークンの読み返し（cat）がマーカーを置き、
+# その直後の now_epoch だけが飛んだ値を返して以降は実時刻へ戻る。これで
+# 「mkdir と読み返しの間に停止した」1 イベントだけを再現できる（恒久的に進めると
+# 後続の奪取が成立して普通に書き込んでしまい、何も検証できない）。
+case_t27_try_lock_abandons_after_stale_threshold() {
+  local s="${HOME}/.claude/settings.json" ref="${SANDBOX}/ref.json"
+  local lock="${HOME}/.claude/.strip-model.lock" stubs base real_date real_cat
+  write_settings "$s" "$DEFAULT_SETTINGS"
+  cp "$s" "$ref"
+  stubs="$(stub_dir)"
+  base="$(date +%s)"
+  real_date="$(command -v date)"
+  real_cat="$(command -v cat)"
+  cat > "${stubs}/date" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "+%s" ] && [ -e "${SANDBOX}/timewarp" ]; then
+  rm -f "${SANDBOX}/timewarp"
+  echo "$((base + 120))"
+  exit 0
+fi
+exec "$real_date" "\$@"
+EOF
+  cat > "${stubs}/cat" <<EOF
+#!/usr/bin/env bash
+last="\${!#}"
+case "\$last" in
+  */token)
+    if [ ! -e "${SANDBOX}/catdone" ]; then
+      : > "${SANDBOX}/catdone"
+      : > "${SANDBOX}/timewarp"
+    fi
+    ;;
+esac
+exec "$real_cat" "\$@"
+EOF
+  chmod +x "${stubs}/date" "${stubs}/cat"
+  export PATH="${stubs}:${PATH}"
+  run_hook
+  export PATH="$ORIG_PATH"
+  assert_hook_ok "t27"
+  assert_same_bytes "t27 上界を超えた取得では臨界区間へ入らない" "$s" "$ref"
+  assert_eq "t27 stderr は空" "$HOOK_ERR" ""
+  rm -f "${lock}/token" 2>/dev/null; rmdir "$lock" 2>/dev/null
+}
+
+# 壊れた名前の退避ディレクトリ（epoch が数値でない・ダッシュが無い）は回収の
+# 対象外として無視する。数値でない値を年齢計算に使って落ちたりしないこと。
+case_t28_gc_ignores_malformed_names() {
+  local s="${HOME}/.claude/settings.json" d
+  write_settings "$s" "$DEFAULT_SETTINGS"
+  for d in \
+    "${HOME}/.claude/.strip-model.lock.stale.nodashes" \
+    "${HOME}/.claude/.strip-model.lock.stale.abc-def-ghi" \
+    "${HOME}/.claude/.strip-model.lock.stale.123-notanumber-9"; do
+    mkdir "$d"
+    printf 'x\n' > "${d}/token"
+  done
+  run_hook
+  assert_hook_ok "t28"
+  assert_eq "t28 stderr は空" "$HOOK_ERR" ""
+  assert_eq "t28 本来の処理は行われる" "$(jq -r 'has("model")' "$s")" "false"
+  for d in \
+    "${HOME}/.claude/.strip-model.lock.stale.nodashes" \
+    "${HOME}/.claude/.strip-model.lock.stale.abc-def-ghi" \
+    "${HOME}/.claude/.strip-model.lock.stale.123-notanumber-9"; do
+    assert_file_exists "t28 壊れた名前は回収対象にしない" "$d"
+    rm -f "${d}/token"; rmdir "$d"
+  done
+  assert_file_absent "t28 ロックは解放されている" "${HOME}/.claude/.strip-model.lock"
+}
+
 # 奪取の途中で SIGKILL された等で残った退避ディレクトリを回収する（F4）。
 # 年齢は名前に埋め込まれた epoch で判断するので、実行中の奪取（epoch が新しい）
 # は巻き込まない。

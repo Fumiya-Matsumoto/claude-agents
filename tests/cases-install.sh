@@ -196,6 +196,85 @@ case_t35c_no_warning_without_legacy_install() {
   assert_not_contains "t35c 旧インストールが無ければ警告しない" "$INSTALL_OUT" "旧インストールが残っています"
 }
 
+# CLAUDE_CONFIG_DIR が ~/.claude と「同じディレクトリの別表記」のとき、自分自身を
+# 旧インストールと誤警告しないこと（レビュー指摘 FF2）。案内どおりアンインストール
+# すると現用の構成を消してしまうので、ここは落としてはいけない。
+# 表記ゆれ 1: 末尾スラッシュ
+case_t35d_no_false_warning_trailing_slash() {
+  export CLAUDE_CONFIG_DIR="${HOME}/.claude/"
+  run_install
+  unset CLAUDE_CONFIG_DIR
+  assert_eq "t35d 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_not_contains "t35d 自分自身を旧インストールと呼ばない" "$INSTALL_OUT" "旧インストールが残っています"
+  [ -L "${HOME}/.claude/hooks/claude-agents-strip-model.sh" ] || fail "t35d: symlink が張られていない"
+}
+
+# 表記ゆれ 2: $HOME 自体が symlink（論理パスと物理パスの食い違い）
+case_t35e_no_false_warning_symlinked_home() {
+  local real="${SANDBOX}/realhome"
+  mkdir -p "$real"
+  ln -s "$real" "${SANDBOX}/linkhome"
+  export HOME="${SANDBOX}/linkhome"
+  export CLAUDE_CONFIG_DIR="${real}/.claude"
+  run_install
+  unset CLAUDE_CONFIG_DIR
+  assert_eq "t35e 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_not_contains "t35e 自分自身を旧インストールと呼ばない" "$INSTALL_OUT" "旧インストールが残っています"
+  [ -L "${real}/.claude/hooks/claude-agents-strip-model.sh" ] || fail "t35e: symlink が張られていない"
+}
+
+# クォート済みと旧クォート無しが併存する環境（手で正しい登録を足して回避した
+# ユーザー等）。旧登録を「差し替える」とクォート済みが 2 つになりフックが毎ターン
+# 2 回走るので、除去でなければならない（レビュー指摘 FF3）。
+case_t34c_removes_legacy_when_current_exists() {
+  local s legacy cmd
+  export HOME="${SANDBOX}/Taro Yamada"
+  mkdir -p "$HOME"
+  s="${HOME}/.claude/settings.json"
+  run_install
+  cmd="$(registered_hook_commands "$s")"
+  legacy="bash ${HOME}/.claude/hooks/claude-agents-strip-model.sh"
+  # 正しい登録（install.sh が入れたもの）に加えて、旧クォート無しの登録と
+  # 無関係な Stop エントリを置く
+  jq --arg legacy "$legacy" --arg cmd "$cmd" '
+    .hooks.Stop = [
+      {"matcher":"","hooks":[{"type":"command","command":"bash ~/bin/notify-stop.sh"}]},
+      {"matcher":"","hooks":[{"type":"command","command":$legacy}]},
+      {"matcher":"","hooks":[{"type":"command","command":$cmd}]}
+    ]' "$s" > "${SANDBOX}/t34c.json" && cp "${SANDBOX}/t34c.json" "$s"
+  run_install
+  assert_eq "t34c 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t34c 旧登録を削除した旨を表示する" "$INSTALL_OUT" "旧登録を削除"
+  assert_eq "t34c 登録は 1 件だけ（2 重登録にしない）" \
+    "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "1"
+  assert_eq "t34c 残るのはクォート付きの方" "$(registered_hook_commands "$s")" "$cmd"
+  assert_eq "t34c 無関係の Stop エントリは残る" \
+    "$(jq -r '[.hooks.Stop[] | objects | .hooks[] | objects | .command] | map(select(contains("notify-stop"))) | length' "$s")" "1"
+  assert_eq "t34c 空になったエントリは落ちる" "$(jq '.hooks.Stop | length' "$s")" "2"
+  run_install
+  assert_contains "t34c 次の実行はスキップ" "$INSTALL_OUT" "Stop フックは登録済み（スキップ）"
+}
+
+# シングルクォートやシェルのメタ文字を含むホームでも、登録コマンドが安全に
+# 実行できること（レビュー指摘 FF7-a）。クォートが壊れていれば $(touch pwned) が
+# 実行されるので、それが起きないことを直接見る。
+case_t34d_quotes_metacharacter_path() {
+  local s cmd
+  export HOME="${SANDBOX}/Ta'ro \$(touch pwned) Yamada"
+  mkdir -p "$HOME"
+  s="${HOME}/.claude/settings.json"
+  run_install
+  assert_eq "t34d 終了ステータス" "$INSTALL_STATUS" "0"
+  cmd="$(registered_hook_commands "$s")"
+  assert_contains "t34d シングルクォートがエスケープされている" "$cmd" "'\\''"
+  jq '.model = "fable"' "$s" > "${SANDBOX}/t34d.json" && cp "${SANDBOX}/t34d.json" "$s"
+  /bin/sh -c "$cmd"
+  assert_eq "t34d POSIX sh で実行できる" "$?" "0"
+  assert_eq "t34d 実際にフックとして働く" "$(jq -r 'has("model")' "$s")" "false"
+  assert_file_absent "t34d コマンド置換が実行されない" "${SANDBOX}/pwned"
+  assert_file_absent "t34d コマンド置換が実行されない（HOME 側）" "${HOME}/pwned"
+}
+
 # 手動で ~ 表記で登録している場合は触らない（二重登録もしない）
 case_t35_install_keeps_manual_registration() {
   local s
@@ -336,8 +415,15 @@ extract_uninstall_snippet() { # 出力先
 
 case_t43_readme_uninstall_roundtrip() {
   local s="${HOME}/.claude/settings.json" snippet="${SANDBOX}/uninstall.sh" status
+  local lock="${HOME}/.claude/.strip-model.lock" retired
   run_install
   assert_eq "t43 install の終了ステータス" "$INSTALL_STATUS" "0"
+  # ロック残骸の掃除も手順に含まれること（フック側の回収は次に書き込みが必要に
+  # なるまで走らないため。レビュー指摘 FF6）
+  retired="${HOME}/.claude/.strip-model.lock.stale.4242-1-999"
+  mkdir "$lock" "$retired"
+  printf 'x\n' > "${lock}/token"
+  printf 'y\n' > "${retired}/token"
   if ! extract_uninstall_snippet "$snippet"; then
     fail "t43: README からアンインストール手順を抽出できない（見出し・コードブロック・cd 行を確認）"
     return
@@ -358,6 +444,8 @@ case_t43_readme_uninstall_roundtrip() {
     "$(find "${HOME}/.claude/skills" -type l 2>/dev/null | wc -l | tr -d ' ')" "0"
   assert_eq "t43 bin の symlink が消える" \
     "$(find "${HOME}/.claude/bin" -type l 2>/dev/null | wc -l | tr -d ' ')" "0"
+  assert_file_absent "t43 ロックを掃除する" "$lock"
+  assert_file_absent "t43 退避ディレクトリを掃除する" "$retired"
 }
 
 # settings.json が symlink ループのとき、README の手順はハングせず中断する

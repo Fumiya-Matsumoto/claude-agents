@@ -232,6 +232,8 @@ run_case t23 "mv 失敗を握り潰さず、しかし非ゼロ終了しない" c
 run_case t24 "奪取されうる時刻を過ぎたら解放しない（解放の TOCTOU）" case_t24_release_refuses_after_stale_threshold
 run_case t25 "stat 後に張り替わったロックを掴んだら奪取を諦める" case_t25_steal_detects_relinked_lock
 run_case t26 "残った退避ディレクトリを回収する（実行中のものは残す）" case_t26_gc_collects_old_retired_lock
+run_case t27 "取得が上界を超えたら成功として扱わない（取得の TOCTOU）" case_t27_try_lock_abandons_after_stale_threshold
+run_case t28 "壊れた名前の退避ディレクトリを無視する" case_t28_gc_ignores_malformed_names
 
 echo "install.sh"
 run_case t30 "新規インストール" case_t30_install_fresh
@@ -240,9 +242,13 @@ run_case t32 "CLAUDE_CONFIG_DIR を尊重する" case_t32_install_claude_config_
 run_case t33 "空白を含むホームでも登録コマンドが動く" case_t33_install_quotes_hook_path
 run_case t34 "クォート無しの旧登録を修正する" case_t34_install_upgrades_legacy_unquoted
 run_case t34b "旧登録の差し替えが他のフック設定を巻き込まない" case_t34b_legacy_replacement_is_surgical
+run_case t34c "クォート済みと旧登録の併存では旧登録を削除する" case_t34c_removes_legacy_when_current_exists
+run_case t34d "メタ文字入りのホームでも登録コマンドが安全" case_t34d_quotes_metacharacter_path
 run_case t35 "手動の ~ 登録は触らない" case_t35_install_keeps_manual_registration
 run_case t35b "CLAUDE_CONFIG_DIR 環境の旧インストールを警告する（削除はしない）" case_t35b_warns_about_legacy_install
 run_case t35c "旧インストールが無ければ警告しない" case_t35c_no_warning_without_legacy_install
+run_case t35d "末尾スラッシュの CLAUDE_CONFIG_DIR で誤警告しない" case_t35d_no_false_warning_trailing_slash
+run_case t35e "HOME が symlink でも誤警告しない" case_t35e_no_false_warning_symlinked_home
 run_case t36 "settings.json が symlink（絶対）でも実体に書く" case_t36_install_settings_symlink
 run_case t37 "settings.json が symlink（相対・多段）でも実体に書く" case_t37_install_settings_symlink_relative_chain
 run_case t38 "symlink ループでも警告して続行する" case_t38_install_settings_symlink_loop
