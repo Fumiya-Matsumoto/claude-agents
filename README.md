@@ -183,10 +183,13 @@ cd claude-agents
 6. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
 7. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
-symlink 方式なので、**agents / skills / bin / hooks 本体の更新は `git pull` だけ**で全マシンに反映されます。ただし例外が 2 つあります。
+symlink 方式なので、**agents / skills / bin / hooks 本体の更新は `git pull` だけ**で全マシンに反映されます。ただし例外が 3 つあります。
 
 - **配布物が増えたとき**: `git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません
 - **`install.sh` が `settings.json` / シェル rc に書き込む内容が変わったとき**: これも `git pull` だけでは反映されず、**`./install.sh` の再実行が必要**です（冪等です）。今回の変更（Stop フックが `"effortLevel"` を `"xhigh"` に正規化するようになった件）はこれに該当します。ただし**`cco` エイリアスは rc 側に既にマーカー付きブロックがある場合、install.sh は上書きせず警告と手動更新の案内を表示するだけです**（無断で rc を書き換えないため）。既にインストール済みの環境では、再実行後に表示される警告に従って `cco` エイリアスを手動で更新してください
+- **このリポジトリを移動・リネーム・削除したとき**: `~/.claude/` 配下の symlink は絶対パスで張られているので全部切れます。特に `hooks/` の symlink が切れると、Stop フックが**毎ターン stderr を出し続けます**（応答自体は壊れません）。移動先で **`./install.sh` を再実行**してください。もう使わない場合は下の「アンインストール」を実行してから消してください
+
+`CLAUDE_CONFIG_DIR` を設定している場合は、install.sh もフックもその値を設定ディレクトリとして使います（未設定なら `~/.claude`）。以下の説明では `~/.claude` と書きますが、設定していればそちらに読み替えてください。
 
 ### 前提
 
@@ -217,7 +220,7 @@ npx skills@latest add mattpocock/skills
 
 ### 注意
 
-- **model の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`/model` などで書き込まれると割当が 2 箇所に分裂し、`settings.json` は machine-local で配布されないので必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` を自動で剥がし、`"effortLevel"` を `"xhigh"` へ正規化します（毎ターン走りますが、書き込みが必要な場合 ―― `"model"` が残っている、または `"effortLevel"` が `"xhigh"` 以外のとき ―― に限って settings.json へ書き込みます）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。`"effortLevel"` の正規化についての詳細は次項を参照してください。このリポジトリと無関係なプロジェクトの既定モデルや effortLevel まで書き換えられるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します（model・effortLevel 両方のオプトアウトが同じスイッチに束ねられています）。**既知の制限**: フック内部の jq 処理は jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください
+- **model の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`/model` などで書き込まれると割当が 2 箇所に分裂し、`settings.json` は machine-local で配布されないので必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` を自動で剥がし、`"effortLevel"` を `"xhigh"` へ正規化します（毎ターン走りますが、書き込みが必要な場合 ―― `"model"` が残っている、または `"effortLevel"` が `"xhigh"` 以外のとき ―― に限って settings.json へ書き込みます）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。`"effortLevel"` の正規化についての詳細は次項を参照してください。このリポジトリと無関係なプロジェクトの既定モデルや effortLevel まで書き換えられるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します（model・effortLevel 両方のオプトアウトが同じスイッチに束ねられています）。**既知の制限**: jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。フックだけでなく **install.sh も `settings.json` 全体を jq で読み書きして丸ごと書き戻す**ので、同じリスクがあります（`agent` / `effortLevel` / Stop フック登録の 3 回）。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください。**もう 1 つの既知の制限**: フックは書き戻す直前に `settings.json` の mtime・サイズ・inode を取り直し、読み出した時点と一致する場合だけ置き換えます（compare-and-swap）。これで「フックが読んでから書くまでの間に Claude Code 本体が `/config` 等で書いた内容が丸ごと巻き戻る」事故は塞げますが、**完全ではありません** — mtime の粒度が 1 秒までのファイルシステムで、同一秒内に同じサイズのまま in-place 書き換えが起きた場合は検出できません（一時ファイル + rename で書くプロセスは inode が変わるので検出できます）。検出した場合フックは何もせずに降り、次のターンで再試行します。**フックが取るロック（`~/.claude/.strip-model.lock`）は相互排他の保証ではありません** — 60 秒より古いロックの奪取が生きたロックを掴んだ場合や、猶予時間を超えるプロセス停止（SIGSTOP・スリープ復帰）が挟まった場合には、2 つのフックが同時に走りえます。POSIX シェルに「inode が一致するときだけ削除する」原子操作が無いため原理的に閉じられない残余で、ロックは競合を減らすためだけのものです。**安全性を担保しているのは上記の compare-and-swap の方**で、ロックが失われても `settings.json` は壊れません（後着の書き込みが弾かれ、次のターンで再試行されます）。CAS が入った以上ロック自体を廃止できるのではないか、という検討は issue #39 で追跡しています
 - **effort の真実の源は model と違い、経路で分かれます（次項の実測順位が根拠）。** サブエージェント 8 体は `settings.json` の `effortLevel` に潰されないため、frontmatter が唯一の指定手段です。一方メインセッション 2 体（`auto-router` / `orchestrator`）は frontmatter の `effort` がそもそも発火しないため、`settings.json` の `effortLevel` と起動時の `--effort` フラグが実効値を決めます。ただし**「唯一の手段」は言い過ぎです** — `settings.json` の `effortLevel` は project 階層のものが global（`~/.claude/settings.json`）に**勝つ**ため、プロジェクト側の `.claude/settings.json` に `effortLevel` を置けばそちらが実効します。また **`settings.json` の `effortLevel` は enum が `low` / `medium` / `high` / `xhigh` に限定されており `"max"` を表現できません**（不正値は黙って捨てられます）。`orchestrator` を `max` で走らせるために `cco` エイリアス側で `--effort max` フラグが必須なのはこのためです。**model と非対称なのはここが理由です** — model は「settings.json から剥がせば frontmatter に一本化される」という設計が成立しますが、effort はメインセッションに frontmatter という指定手段自体が存在しないため、単純に剥がすとメインセッション 2 体の effort を誰も制御できなくなります。したがって install.sh が `"effortLevel": "xhigh"` を能動的に設定したうえで、`hooks/claude-agents-strip-model.sh` が毎ターンそれを `"xhigh"` へ正規化し直します。`/effort` はセッション中いつでも打てますが、次の応答完了時に `settings.json` の値が `"xhigh"` へ戻るため、**その値が以後のセッションへ持ち越されることはありません**。**未確認**: 実行中のセッションの実効 effort が、フックの書き戻し後もそのターンの指定を保つのか、次のターンで `"xhigh"` に戻るのかは未検証です（バイナリには settings 再読込のサブスクライバと `/effort` が直接更新する UI 状態の両方があり、ターンごとのリクエストがどちらを見るか未追跡）。したがって切替の射程は「セッション限り」か「1 ターン限り」のどちらかで、**恒久化しないことだけが確定しています**。`orchestrator` だけ `max` で走らせたい場合は、`--effort` フラグが `effortLevel` に勝つ性質を使い、`cco` エイリアス側で `--effort max` を明示的に上書きします（前節「ペイン運用」を参照）
 - **effort の優先順位は実測で確定しています（2026-07-30）: `--effort` フラグ > `settings.json` の `effortLevel` > frontmatter の `effort`。** メインセッションでは frontmatter の `effort` は発火しません（`effortLevel: low` を置くと、frontmatter が `high` の `auto-router` が `low` で起動する）。フラグはそれに勝ちます（同条件で `--effort max` は `max` で起動する）。一方 **サブエージェント経路では frontmatter が発火し、`settings.json` に潰されません**（同条件で `code-explorer` は frontmatter どおり `high` で起動する）。したがって**サブエージェント 8 体の effort は frontmatter が唯一の指定手段**であり、**メインセッション 2 体は `settings.json` の `effortLevel` と起動時フラグが実効値を決めます**。frontmatter にも同じ値を書いてあるのは、この 2 体がサブエージェントとして起動された場合に効かせるためです
 - auto-router に `tools:` 許可リストを**意図的に付けていません**。付けると MCP ツール・Skill・Workflow がメインセッションから使えなくなるためです（許可リストは排他的）。ルーティング規律はプロンプトで担保しています
@@ -338,35 +341,76 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 ## アンインストール
 
 ```bash
-# settings.json から "agent" キー・"effortLevel" キーと Stop フックの登録
-# エントリを削除（symlink を先に消すと、切れた symlink をフックが毎ターン
-# 叩く状態が残るため必ず先に実行する）
-# settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らずリンク
-# 自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに一時
-# ファイルを作って書き戻す
-# 注意: del(.agent, .effortLevel) はハーネスの既定値に戻すだけであり、
-# インストール前にユーザーが settings.json に置いていた元の値には戻らない。
-# 元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
-# に残っているので、必要ならそこから手動で復元すること
-SETTINGS=~/.claude/settings.json
-target="$SETTINGS"
-while [ -L "$target" ]; do
-  link="$(readlink "$target")"
-  case "$link" in
-    /*) target="$link" ;;
-    *)  target="$(dirname "$target")/$link" ;;
-  esac
-done
-REAL_SETTINGS="$(cd "$(dirname "$target")" && pwd -P)/$(basename "$target")"
-tmp="$(mktemp "$(dirname "$REAL_SETTINGS")/.settings.json.uninstall.XXXXXX")"
-jq 'del(.agent, .effortLevel) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
-  "$REAL_SETTINGS" > "$tmp" && mv "$tmp" "$REAL_SETTINGS"
-# symlink 削除
-find ~/.claude/agents -type l -lname "$(pwd)/agents/*" -delete
-find ~/.claude/skills -type l -lname "$(pwd)/skills/*" -delete
-find ~/.claude/bin -type l -lname "$(pwd)/bin/*" -delete
-find ~/.claude/hooks -type l -lname "$(pwd)/hooks/*" -delete
-# シェル rc から "# >>> claude-agents aliases >>>" 〜 "# <<< claude-agents aliases <<<" のブロックを削除
+# 0. このリポジトリを clone したディレクトリへ移動する。下の find は
+#    "$(pwd)/agents/*" のように symlink の指す先をカレントディレクトリ基準で
+#    組み立てるので、別ディレクトリで実行すると 1 つも消えないまま
+#    「成功したように見える」
+cd /path/to/claude-agents
+
+# 1. settings.json から "agent" キー・"effortLevel" キーと Stop フックの登録
+#    エントリを削除（symlink を先に消すと、切れた symlink をフックが毎ターン
+#    叩く状態が残るため必ず先に実行する）
+#    settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らず
+#    リンク自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに
+#    一時ファイルを作って書き戻す
+#    注意: del(.agent, .effortLevel) はハーネスの既定値に戻すだけであり、
+#    インストール前にユーザーが settings.json に置いていた元の値には戻らない。
+#    元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
+#    に残っているので、必要ならそこから手動で復元すること
+#    全体を ( ) のサブシェルに入れてあるのは、作業用の変数を対話シェルに
+#    残さないため。失敗時はメッセージを出して settings.json を変更せずに抜ける
+(
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  target="$CLAUDE_DIR/settings.json"
+  n=0
+  while [ -L "$target" ]; do
+    n=$((n + 1))
+    # symlink ループを踏むと無限ループになるので段数で打ち切る
+    [ "$n" -le 20 ] || { echo "symlink が 20 段を超えました（ループの可能性）。中断します。" >&2; exit 1; }
+    link="$(readlink "$target")" || { echo "readlink に失敗: $target" >&2; exit 1; }
+    case "$link" in
+      /*) target="$link" ;;
+      *)  target="$(dirname "$target")/$link" ;;
+    esac
+  done
+  dir="$(cd "$(dirname "$target")" && pwd -P)" || exit 1
+  real="$dir/$(basename "$target")"
+  [ -f "$real" ] || { echo "settings.json の実体が見つかりません: $real" >&2; exit 1; }
+  tmp="$(mktemp "$dir/.settings.json.uninstall.XXXXXX")" || exit 1
+  if jq 'del(.agent, .effortLevel) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
+      "$real" > "$tmp"; then
+    mv "$tmp" "$real"
+  else
+    # 失敗したら隠しファイルを残さない
+    rm -f "$tmp"
+    echo "jq に失敗しました。settings.json は変更していません。" >&2
+    exit 1
+  fi
+)
+
+# 2. symlink 削除。設定ディレクトリの決め方は手順 1 と同じ（CLAUDE_CONFIG_DIR が
+#    あればそちら）。-print を付けてあるのは、find が対象ゼロでも成功するため
+#    ―― 何も表示されなければ 1 本も消えていない（＝ cd 先が違う、または既に
+#    アンインストール済み）と分かるようにするため
+(
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  for sub in agents skills bin hooks; do
+    find "$CLAUDE_DIR/$sub" -type l -lname "$(pwd)/${sub}/*" -print -delete
+  done
+)
+
+# 3. フックのロック残骸を掃除する。通常は残らないが、フックが奪取の途中で
+#    SIGKILL された場合に .strip-model.lock.stale.* が残ることがある。フック側の
+#    回収は「次に settings.json への書き込みが必要になったとき」にしか走らないので、
+#    アンインストール時はここで消しておく（マッチしないときのエラーは捨てる）
+(
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  rm -f "$CLAUDE_DIR"/.strip-model.lock/token "$CLAUDE_DIR"/.strip-model.lock.stale.*/token 2>/dev/null
+  rmdir "$CLAUDE_DIR"/.strip-model.lock "$CLAUDE_DIR"/.strip-model.lock.stale.* 2>/dev/null
+  true
+)
+
+# 4. シェル rc から "# >>> claude-agents aliases >>>" 〜 "# <<< claude-agents aliases <<<" のブロックを削除
 ```
 
 ## License

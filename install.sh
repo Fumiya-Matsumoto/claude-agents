@@ -2,7 +2,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="${HOME}/.claude"
+# CLAUDE_CONFIG_DIR を尊重する（hooks/claude-agents-strip-model.sh と同じ既定）。
+# 無視すると、この環境変数を設定しているユーザーでは agents / skills / bin /
+# hooks も settings.json への書き込みも Claude Code が読まない場所に入り、
+# エラーも警告も出ないまま「導入したのに一度も動かない」状態になる。
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 AGENTS_DIR="${CLAUDE_DIR}/agents"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 STAMP="$(date +%Y%m%d%H%M%S)"
@@ -77,6 +81,12 @@ done
 # 物理パスへ正規化）で解決する。解決できない場合（壊れた symlink 等）は
 # 警告した上でこのステップ全体をスキップする（対話的スクリプトなので
 # フックのように無言で降りない）。
+#
+# この解決ロジックはフック本体と README のアンインストール手順にも同じ形で
+# 書かれている（3 箇所の重複）。共通スクリプトへ切り出さない理由は
+# hooks/claude-agents-strip-model.sh のコメントを参照（フックは symlink 経由で
+# 実行されるため、共通スクリプトを source するには自分自身の symlink 解決が
+# 必要になり、新しい壊れ方が増える）。3 箇所を触るときは 3 箇所とも直すこと。
 resolve_symlink_chain() {
   local target="$1" link dir resolve_count=0
   while [ -L "$target" ]; do
@@ -222,29 +232,115 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # よっては展開されないため）。`objects` で要素の型を絞り、Stop がオブ
     # ジェクト形式だったり hooks 配列に文字列等が混入していても落ちないよう
     # にする。
-    HOOK_CMD="bash ${HOOKS_DIR}/claude-agents-strip-model.sh"
-    tmp="$(mktemp_settings "$SETTINGS_DIR")"
-    if [ -z "$tmp" ]; then
-      echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。Stop フックの登録をスキップします。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
-    elif jq --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" '
-      .hooks //= {} |
-      .hooks.Stop //= [] |
-      (
-        if ([.hooks.Stop[]? | objects | .hooks[]? | objects | .command? // empty] | any(contains($needle))) then
-          .
-        else
-          .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
-        end
-      )
-    ' "$SETTINGS" > "$tmp"; then
-      preserve_mode "$SETTINGS" "$tmp"
-      mv "$tmp" "$SETTINGS"
-      hook_registered=1
-      echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録（冪等）'
-    else
-      rm -f "$tmp"
-      echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+    #
+    # パスはシェルに解釈されるコマンド文字列の中に埋め込まれるので、シェルの
+    # メタ文字を含む場合はクォートする。ホームディレクトリに空白を含む環境
+    # （/Users/Taro Yamada/...）だと `bash /Users/Taro` になり毎ターン失敗し、
+    # しかも settings.json に焼き付くので後から手で直す羽目になる。
+    # 空白等を含まない通常のパスはクォートしない ―― そうしておくと、既存
+    # 環境（クォート無しで登録済み）が state=current と判定されて無駄な
+    # 書き戻しが起きない。
+    #
+    # クォートはシングルクォート包み + '\'' エスケープで行う。bash の
+    # `printf %q` は制御文字や非 ASCII に対して $'\346...' という bash 方言を
+    # 返すことがあり、登録したコマンドを POSIX sh（dash 等）が実行する構成だと
+    # 毎ターン失敗する（しかも settings.json に焼き付く）。シングルクォート包み
+    # なら全 POSIX sh で安全。
+    quote_for_shell() {
+      # 置換文字列を変数に組み立てる。"${1//\'/\'\\\'\'}" と直接書くと、二重
+      # 引用符の中では \' がバックスラッシュ + ' のまま残るため置換結果が
+      # 壊れる（実測: /a/b'c → '/a/b\'\\'\'c' となり sh が構文エラー）。
+      local sq="'" esc="'\\''"
+      case "$1" in
+        # 英数字と _ . / - だけならシェルの解釈と一致するのでそのまま
+        *[!A-Za-z0-9_./-]*) printf "'%s'\n" "${1//$sq/$esc}" ;;
+        *) printf '%s\n' "$1" ;;
+      esac
+    }
+    HOOK_PATH="${HOOKS_DIR}/claude-agents-strip-model.sh"
+    HOOK_CMD="bash $(quote_for_shell "$HOOK_PATH")"
+    # クォートが必要なパスなのに、過去の install.sh が書いたクォート無しの
+    # 文字列がそのまま残っている場合だけ、その 1 エントリを差し替える。
+    # 差し替え対象を「過去の install.sh が書いた形と完全一致」に限定するのは、
+    # ~ 表記の手動登録やユーザーが手を入れたエントリを書き換えないため。
+    LEGACY_HOOK_CMD="bash ${HOOK_PATH}"
+
+    # 既存判定を登録処理から切り離す。既に登録済みでも毎回「登録（冪等）」と
+    # 表示していたのを、エイリアス側と同様に出し分けるため。
+    # jq が落ちた場合・想定外の値を返した場合は "error" 扱いにして、書き込みを
+    # 一切せずに警告する（重複登録を避けるため、判定できないときは書かない）。
+    #
+    # "both"（クォート済みと旧クォート無しが併存）を "current" より先に見る。
+    # 順序を逆にすると、手で正しい登録を足して回避したユーザーの環境で、壊れた
+    # 旧コマンドが毎ターン失敗し続ける。併存時は旧コマンドを「差し替え」ては
+    # いけない ―― クォート済みが 2 つになってフックが毎ターン 2 回走る。除去する。
+    if ! hook_state="$(jq -r --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" --arg legacy "$LEGACY_HOOK_CMD" '
+      [(.hooks?.Stop? | arrays)[] | objects | (.hooks? | arrays)[] | objects | .command? // empty]
+      | if ($cmd != $legacy) and any(. == $cmd) and any(. == $legacy) then "both"
+        elif any(. == $cmd) then "current"
+        elif ($cmd != $legacy) and any(. == $legacy) then "legacy"
+        elif any(contains($needle)) then "current"
+        else "absent" end
+    ' "$SETTINGS" 2>/dev/null)"; then
+      hook_state="error"
     fi
+
+    case "$hook_state" in
+      current)
+        hook_registered=1
+        echo 'settings.json: Stop フックは登録済み（スキップ）'
+        ;;
+      absent|legacy|both)
+        tmp="$(mktemp_settings "$SETTINGS_DIR")"
+        if [ -z "$tmp" ]; then
+          echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。Stop フックの登録をスキップします。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+        elif jq --arg cmd "$HOOK_CMD" --arg legacy "$LEGACY_HOOK_CMD" --arg state "$hook_state" '
+          .hooks //= {} |
+          .hooks.Stop //= [] |
+          if $state == "legacy" then
+            .hooks.Stop |= map(
+              if type == "object" and (.hooks? | type) == "array" then
+                .hooks |= map(if type == "object" and .command == $legacy then .command = $cmd else . end)
+              else . end
+            )
+          elif $state == "both" then
+            # 旧コマンドだけを取り除く。それによって空になったエントリ（元は
+            # 非空だったもの）は落とす。もともと空だったエントリや、同じ
+            # エントリ内の別コマンド、配列内の非オブジェクト要素は保持する。
+            .hooks.Stop |= map(
+              if type == "object" and (.hooks? | type) == "array" then
+                (.hooks | length) as $before
+                | .hooks |= map(select(type != "object" or .command != $legacy))
+                | if (.hooks | length) == 0 and $before > 0 then empty else . end
+              else . end
+            )
+          else
+            .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
+          end
+        ' "$SETTINGS" > "$tmp"; then
+          preserve_mode "$SETTINGS" "$tmp"
+          mv "$tmp" "$SETTINGS"
+          hook_registered=1
+          case "$hook_state" in
+            legacy)
+              echo 'settings.json: Stop フックの登録コマンドをクォート付きに修正（パスに空白等が含まれるため、従来の登録は毎ターン失敗していました）'
+              ;;
+            both)
+              echo 'settings.json: Stop フックのクォート無しの旧登録を削除（クォート付きの登録が既にあるため。旧登録は毎ターン失敗していました）'
+              ;;
+            *)
+              echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録'
+              ;;
+          esac
+        else
+          rm -f "$tmp"
+          echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+        fi
+        ;;
+      *)
+        echo '⚠ Stop フックの登録状態を判定できませんでした（jq エラー等）。重複登録を避けるため settings.json は変更していません。手動で確認してください（claude-agents-strip-model.sh を参照）。'
+        ;;
+    esac
   fi
 
   # "model" 残留チェックは settings_writable の成否に関わらず行う（読み取り
@@ -265,7 +361,9 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
       echo '  Stop フックの登録ができていない（上の警告を参照）ため、次のターンでも自動では'
       echo '  剥がれません。手動で消してください:'
     fi
-    echo "    tmp=\$(mktemp \"${SETTINGS_DIR}/.settings.json.XXXXXX\") && jq 'del(.model)' ${SETTINGS} > \"\$tmp\" && mv \"\$tmp\" ${SETTINGS}"
+    # 案内するコマンドの中のパスもクォートする（Stop フック登録と同じ理由。
+    # ホームに空白がある環境でそのままコピペすると壊れるため）
+    echo "    tmp=\$(mktemp \"${SETTINGS_DIR}/.settings.json.XXXXXX\") && jq 'del(.model)' \"${SETTINGS}\" > \"\$tmp\" && mv \"\$tmp\" \"${SETTINGS}\""
   fi
 elif [ -z "$SETTINGS_DIR" ]; then
   : # 実体パスを解決できなかった旨は上ですでに警告済み
@@ -332,6 +430,79 @@ if command -v codex >/dev/null 2>&1; then
 else
   echo 'ℹ codex CLI が見つかりません。系列外レビューはスキップされます（構成は壊れません）。'
   echo '  導入すると、独立レビューが走る場面で系列外の第 2 レビュアが並行で走ります。'
+fi
+
+# 8. CLAUDE_CONFIG_DIR を使っている環境で、~/.claude 側に残っている旧インストール
+#    を検出して知らせる。削除も削除の提案もしない（rc を無断で書き換えない先例に
+#    合わせる。旧側の settings.json にはユーザーが導入前から置いていた値が混ざり
+#    うるので、こちらの判断で消してよいものではない）。
+#    それでも黙ってはいけないのは、旧インストールが「Claude Code が読まないので
+#    無害」なのは CLAUDE_CONFIG_DIR が設定されている間だけで、後で外すと黙って
+#    復活するため。それを伝えられるのはこのタイミングしかない。
+#    ここで「旧」と「現用」が同じディレクトリかどうかを生の文字列で比べては
+#    いけない。$CLAUDE_DIR は環境変数を無加工で採用し、$LEGACY_DIR は $HOME から
+#    組み立てるので、同じディレクトリでも表記が食い違う（末尾スラッシュ付きの
+#    CLAUDE_CONFIG_DIR="$HOME/.claude/"、$HOME 自体が symlink の場合の論理/物理
+#    パス）。食い違うと、今張ったばかりの symlink を「旧インストール」として
+#    警告し、案内どおりにアンインストールすると現用の構成を消してしまう。
+#    両辺を物理パスへ正規化してから比べる。
+normalize_dir() {
+  local p="$1" resolved
+  if resolved="$(cd "$p" 2>/dev/null && pwd -P)"; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  # 存在しない等で cd できない場合は末尾スラッシュを落としただけの値を返す
+  while :; do
+    case "$p" in
+      /) break ;;
+      */) p="${p%/}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
+LEGACY_DIR="${HOME}/.claude"
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
+  && [ -d "$LEGACY_DIR" ] \
+  && [ "$(normalize_dir "$LEGACY_DIR")" != "$(normalize_dir "$CLAUDE_DIR")" ]; then
+  legacy_links=0
+  legacy_hook=0
+  for sub in agents skills bin hooks; do
+    for f in "${LEGACY_DIR}/${sub}"/*; do
+      # マッチしない場合はパターン文字列そのものが来るので -L で弾かれる
+      [ -L "$f" ] || continue
+      link_target="$(readlink "$f" 2>/dev/null || true)"
+      case "$link_target" in
+        "${REPO_DIR}"/*) legacy_links=$((legacy_links + 1)) ;;
+      esac
+    done
+  done
+  if [ -f "${LEGACY_DIR}/settings.json" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '[.hooks?.Stop? | arrays | .[] | objects | (.hooks? | arrays)[] | objects | .command? // empty]
+              | any(contains("claude-agents-strip-model.sh"))' \
+         "${LEGACY_DIR}/settings.json" >/dev/null 2>&1; then
+      legacy_hook=1
+    fi
+  fi
+  if [ "$legacy_links" -gt 0 ] || [ "$legacy_hook" -eq 1 ]; then
+    echo ''
+    echo "⚠ CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} を使っていますが、${LEGACY_DIR} 側にこのリポジトリの"
+    echo '  旧インストールが残っています:'
+    # set -e 下では `[ ... ] && echo` を単独文に置けない（テストが偽だと
+    # スクリプトごと落ちる）ので if で書く
+    if [ "$legacy_links" -gt 0 ]; then
+      echo "    - agents / skills / bin / hooks の symlink ${legacy_links} 本"
+    fi
+    if [ "$legacy_hook" -eq 1 ]; then
+      echo "    - settings.json の Stop フック登録（claude-agents-strip-model.sh）"
+    fi
+    echo '  Claude Code は CLAUDE_CONFIG_DIR 側しか読まないので、今は無害です。ただし後で'
+    echo '  CLAUDE_CONFIG_DIR の設定を外すと、この旧インストールが黙って復活します（古い agents 定義や'
+    echo '  古いパスの Stop フックが効き始めます）。'
+    echo '  こちらからは削除しません（旧側の settings.json には導入前からの設定が混ざりうるため）。'
+    echo '  不要なら README の「アンインストール」を CLAUDE_CONFIG_DIR を外した状態で実行してください。'
+  fi
 fi
 
 echo ""
