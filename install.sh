@@ -269,9 +269,15 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # 表示していたのを、エイリアス側と同様に出し分けるため。
     # jq が落ちた場合・想定外の値を返した場合は "error" 扱いにして、書き込みを
     # 一切せずに警告する（重複登録を避けるため、判定できないときは書かない）。
+    #
+    # "both"（クォート済みと旧クォート無しが併存）を "current" より先に見る。
+    # 順序を逆にすると、手で正しい登録を足して回避したユーザーの環境で、壊れた
+    # 旧コマンドが毎ターン失敗し続ける。併存時は旧コマンドを「差し替え」ては
+    # いけない ―― クォート済みが 2 つになってフックが毎ターン 2 回走る。除去する。
     if ! hook_state="$(jq -r --arg needle "claude-agents-strip-model.sh" --arg cmd "$HOOK_CMD" --arg legacy "$LEGACY_HOOK_CMD" '
       [(.hooks?.Stop? | arrays)[] | objects | (.hooks? | arrays)[] | objects | .command? // empty]
-      | if any(. == $cmd) then "current"
+      | if ($cmd != $legacy) and any(. == $cmd) and any(. == $legacy) then "both"
+        elif any(. == $cmd) then "current"
         elif ($cmd != $legacy) and any(. == $legacy) then "legacy"
         elif any(contains($needle)) then "current"
         else "absent" end
@@ -284,7 +290,7 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
         hook_registered=1
         echo 'settings.json: Stop フックは登録済み（スキップ）'
         ;;
-      absent|legacy)
+      absent|legacy|both)
         tmp="$(mktemp_settings "$SETTINGS_DIR")"
         if [ -z "$tmp" ]; then
           echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。Stop フックの登録をスキップします。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
@@ -297,6 +303,17 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
                 .hooks |= map(if type == "object" and .command == $legacy then .command = $cmd else . end)
               else . end
             )
+          elif $state == "both" then
+            # 旧コマンドだけを取り除く。それによって空になったエントリ（元は
+            # 非空だったもの）は落とす。もともと空だったエントリや、同じ
+            # エントリ内の別コマンド、配列内の非オブジェクト要素は保持する。
+            .hooks.Stop |= map(
+              if type == "object" and (.hooks? | type) == "array" then
+                (.hooks | length) as $before
+                | .hooks |= map(select(type != "object" or .command != $legacy))
+                | if (.hooks | length) == 0 and $before > 0 then empty else . end
+              else . end
+            )
           else
             .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
           end
@@ -304,11 +321,17 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
           preserve_mode "$SETTINGS" "$tmp"
           mv "$tmp" "$SETTINGS"
           hook_registered=1
-          if [ "$hook_state" = "legacy" ]; then
-            echo 'settings.json: Stop フックの登録コマンドをクォート付きに修正（パスに空白等が含まれるため、従来の登録は毎ターン失敗していました）'
-          else
-            echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録'
-          fi
+          case "$hook_state" in
+            legacy)
+              echo 'settings.json: Stop フックの登録コマンドをクォート付きに修正（パスに空白等が含まれるため、従来の登録は毎ターン失敗していました）'
+              ;;
+            both)
+              echo 'settings.json: Stop フックのクォート無しの旧登録を削除（クォート付きの登録が既にあるため。旧登録は毎ターン失敗していました）'
+              ;;
+            *)
+              echo 'settings.json: Stop フックに claude-agents-strip-model.sh を登録'
+              ;;
+          esac
         else
           rm -f "$tmp"
           echo '⚠ Stop フックの登録に失敗しました（jq エラー）。手動登録が必要です（claude-agents-strip-model.sh を参照）。'
@@ -416,8 +439,33 @@ fi
 #    それでも黙ってはいけないのは、旧インストールが「Claude Code が読まないので
 #    無害」なのは CLAUDE_CONFIG_DIR が設定されている間だけで、後で外すと黙って
 #    復活するため。それを伝えられるのはこのタイミングしかない。
+#    ここで「旧」と「現用」が同じディレクトリかどうかを生の文字列で比べては
+#    いけない。$CLAUDE_DIR は環境変数を無加工で採用し、$LEGACY_DIR は $HOME から
+#    組み立てるので、同じディレクトリでも表記が食い違う（末尾スラッシュ付きの
+#    CLAUDE_CONFIG_DIR="$HOME/.claude/"、$HOME 自体が symlink の場合の論理/物理
+#    パス）。食い違うと、今張ったばかりの symlink を「旧インストール」として
+#    警告し、案内どおりにアンインストールすると現用の構成を消してしまう。
+#    両辺を物理パスへ正規化してから比べる。
+normalize_dir() {
+  local p="$1" resolved
+  if resolved="$(cd "$p" 2>/dev/null && pwd -P)"; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  # 存在しない等で cd できない場合は末尾スラッシュを落としただけの値を返す
+  while :; do
+    case "$p" in
+      /) break ;;
+      */) p="${p%/}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
 LEGACY_DIR="${HOME}/.claude"
-if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$LEGACY_DIR" != "$CLAUDE_DIR" ] && [ -d "$LEGACY_DIR" ]; then
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
+  && [ -d "$LEGACY_DIR" ] \
+  && [ "$(normalize_dir "$LEGACY_DIR")" != "$(normalize_dir "$CLAUDE_DIR")" ]; then
   legacy_links=0
   legacy_hook=0
   for sub in agents skills bin hooks; do
