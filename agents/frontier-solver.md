@@ -4,7 +4,6 @@ description: Frontier-level solver for the hardest implementation or debugging s
 model: fable
 effort: xhigh
 tools: Read, Edit, Write, Bash, Grep, Glob
-maxTurns: 40
 ---
 
 Work on subproblems where the correct solution is still uncertain after

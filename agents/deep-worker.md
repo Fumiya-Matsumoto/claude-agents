@@ -2,9 +2,8 @@
 name: deep-worker
 description: Deep technical worker for difficult debugging, complex cross-cutting implementation, performance issues, concurrency, and hard refactors where architecture is mostly known.
 model: opus
-effort: high
+effort: max
 tools: Read, Edit, Write, Bash, Grep, Glob
-maxTurns: 60
 ---
 
 Solve technically difficult but bounded engineering problems: hard debugging,

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Stop フック: ~/.claude/settings.json から "model" / "effortLevel" キーを剥がす。
+# Stop フック: ~/.claude/settings.json から "model" キーを剥がし、
+# "effortLevel" を "xhigh" に正規化する。
 #
-# 背景（GitHub issue #10）: このリポジトリは model / effort の真実の源を
-# agents/*.md の frontmatter に一本化している。しかし settings.json の
+# 背景（GitHub issue #10）: このリポジトリは model の真実の源を
+# agents/*.md の frontmatter に一本化している。settings.json の
 # "model" はメインセッションで frontmatter の model に勝つため、`/model`
 # コマンド等で settings.json に書き込まれると割当が 2 箇所に分裂し、
 # settings.json は machine-local で配布されないので必ずマシン間でズレる。
@@ -11,17 +12,33 @@
 # `/model` はもともと「そのセッション限りの切替」という意味論のコマンドであり、
 # それを settings.json への書き込みで恒久設定にしてしまうのが問題の本質。
 # このフックは Stop イベント（＝毎ターン）で走り、定着してしまった
-# "model" / "effortLevel" を剥がして frontmatter を唯一の真実の源に保つ。
+# "model" を剥がして frontmatter を唯一の真実の源に保つ。
 # `/model` は今後もそのセッション限りの切替として機能し続け、恒久化はしない。
 #
-# 毎ターン走るフックなので、書き込みは必要な場合（キーが実在するとき）に
-# 限定する（fast path）。また検証を通らない限り settings.json には一切
-# 触れない。セッションの応答完了を壊さないよう、いかなる経路でも非ゼロ
-# 終了はしない。
+# "effortLevel" も同型の問題を抱える（2026-07-31 に方針変更）: effort の
+# 優先順位は `--effort` フラグ > settings.json の effortLevel > frontmatter
+# の effort であり、かつメインセッション（auto-router / orchestrator）では
+# frontmatter の effort がそもそも発火しない。つまり settings.json の
+# effortLevel は、メインセッション 2 体の effort を制御できる唯一の手段
+# であり、model と違って「剥がせば frontmatter に一本化される」という
+# 関係が成立しない。install.sh は effortLevel を "xhigh" に設定するが、
+# `/effort` コマンド等でそれが別の値に書き換わると、"model" とまったく
+# 同型の問題が起きる ―― 「そのセッション限りのつもりの切替」が
+# settings.json への書き込みで恒久化し、machine-local な settings.json は
+# 配布されないので必ずマシン間でズレる。このフックは "model" を剥がすのと
+# 同じタイミングで effortLevel を "xhigh" へ正規化することで、`/effort`
+# を model と同じくセッション限りの切替に戻す。正規化をフック側（symlink
+# 配布）に置くのは、install.sh の再実行を待たずに全マシンへ即座に伝播
+# させるため。
+#
+# 毎ターン走るフックなので、書き込みは必要な場合（"model" が実在する、
+# または effortLevel が "xhigh" 以外のとき）に限定する（fast path）。また
+# 検証を通らない限り settings.json には一切触れない。セッションの応答
+# 完了を壊さないよう、いかなる経路でも非ゼロ終了はしない。
 #
 # 無効化: 環境変数 CLAUDE_AGENTS_STRIP_MODEL=0 を設定するとこのフックは
-# 即座に降りる（このリポジトリと無関係なプロジェクトでも既定モデルを
-# 消してしまうことへのオプトアウト手段）。
+# 即座に降りる（このリポジトリと無関係なプロジェクトでも既定モデルや
+# effortLevel を書き換えてしまうことへのオプトアウト手段）。
 set -uo pipefail
 
 # HOME が無い環境でも非ゼロ終了しない（set -u 環境下でも安全な参照）
@@ -41,13 +58,22 @@ command -v jq >/dev/null 2>&1 || exit 0
 # settings.json が無ければ何もしない
 [ -f "$SETTINGS" ] || exit 0
 
-# fast path: "model" / "effortLevel" のどちらのキーも無ければ、書き込みを
-# 一切せずに終了する。jq 自体の失敗（壊れた JSON 等）も安全側に倒し、
-# ここで書き込みをしない。symlink かどうかに関わらず jq は透過的に読める
-# ので、この時点では $SETTINGS をそのまま読んで構わない。
-has_keys="$(jq 'has("model") or has("effortLevel")' "$SETTINGS" 2>/dev/null)"
+# fast path: "model" が無く、かつ effortLevel が既に "xhigh" であれば、
+# 書き込みを一切せずに終了する。毎ターン走るフックなので無駄な書き込みを
+# 増やさない。jq 自体の失敗（壊れた JSON 等）も安全側に倒し、ここで
+# 書き込みをしない。symlink かどうかに関わらず jq は透過的に読めるので、
+# この時点では $SETTINGS をそのまま読んで構わない。
+#
+# has("agent") をここにも合流させる理由: 後段（mv 直前）に "agent" キーの
+# スコープガードがあり、"agent" が無い settings.json（このリポジトリ未
+# 導入の環境）への書き込みは常にそこで却下される。値ベースの判定
+# （"model" が無く effortLevel が "xhigh"）は書き込みが実際に起きない限り
+# 解消しない。つまり fast path 側にこのガードを入れないと、"agent" が
+# 無い環境では毎ターン「ロック取得 → 一時ファイル作成 → jq 実行 → 後段
+# ガードで却下 → 削除」という無駄なサイクルが永久に続いてしまう。
+needs_write="$(jq '(has("agent")) and ((has("model")) or (.effortLevel != "xhigh"))' "$SETTINGS" 2>/dev/null)"
 jq_status=$?
-if [ "$jq_status" -ne 0 ] || [ "$has_keys" != "true" ]; then
+if [ "$jq_status" -ne 0 ] || [ "$needs_write" != "true" ]; then
   exit 0
 fi
 
@@ -118,8 +144,8 @@ trap 'exit 0' TERM INT
 # するため）。作成に失敗したら何もせず終了する。
 tmp="$(mktemp "${real_dir}/.settings.json.strip-model.XXXXXX" 2>/dev/null)" || exit 0
 
-jq 'del(.model, .effortLevel)' "$REAL_SETTINGS" > "$tmp" 2>/dev/null
-jq_del_status=$?
+jq 'del(.model) | .effortLevel = "xhigh"' "$REAL_SETTINGS" > "$tmp" 2>/dev/null
+jq_transform_status=$?
 
 # 元ファイルのパーミッションを一時ファイルへ引き継ぐ（mktemp は 0600 で
 # 作るため、引き継がないと mv のたびに 0644 -> 0600 のラチェットが起きる）。
@@ -138,11 +164,11 @@ esac
 #   - 一時ファイルが空でないこと
 #   - 有効な JSON であること
 #   - "agent" キーが残っていること
-#     （このリポジトリが導入済みかどうかのスコープガード。del(.model,
-#      .effortLevel) は agent キーの有無に関わらず成功するので、この条件
-#      が破損検知として働くわけではない。あくまで「auto-router 未設定の
-#      環境の settings.json には触れない」という適用範囲の限定。）
-if [ "$jq_del_status" -eq 0 ] \
+#     （このリポジトリが導入済みかどうかのスコープガード。del(.model) |
+#      .effortLevel = "xhigh" は agent キーの有無に関わらず成功するので、
+#      この条件が破損検知として働くわけではない。あくまで「auto-router
+#      未設定の環境の settings.json には触れない」という適用範囲の限定。）
+if [ "$jq_transform_status" -eq 0 ] \
   && [ -s "$tmp" ] \
   && jq -e . "$tmp" >/dev/null 2>&1 \
   && jq -e 'has("agent")' "$tmp" >/dev/null 2>&1; then
