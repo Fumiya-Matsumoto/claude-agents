@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""codex-ratelimits — codex app-server の JSON-RPC を叩き、レート制限とモデル
+一覧を消費ゼロで取得する（read-only）。
+
+`codex app-server` は stdio 常駐サーバで、`initialize` → `initialized` →
+目的のリクエストを送り、応答を読み終えるまで stdin を開いたまま保持する
+必要がある（EOF を送ると応答前にサーバが降りる）。素朴なワンライナーでは
+実装できないため、このヘルパを介す。
+
+使い方（単体実行）:
+    bin/codex-ratelimits              # rateLimits と model/list の両方を JSON で出力
+    bin/codex-ratelimits ratelimits   # account/rateLimits/read のみ
+    bin/codex-ratelimits models       # model/list のみ
+    bin/codex-ratelimits postflight-summary
+        # bin/codex-review の postflight 専用。枠の状態を 1 行の人間可読
+        # テキストで stdout に出す。取得に失敗しても例外を投げず、何も
+        # 出力せず終了コード 0 で返る（呼び出し側を絶対にハングさせない・
+        # 失敗させないための設計）。
+
+終了コード: 0=成功 / 2=引数エラー / 127=codex CLI 未導入 / 1=その他の失敗
+（timeout・不正な応答等）。ただし postflight-summary は常に 0 を返す。
+
+応答にアカウント識別子・トークンが含まれる場合は出力しない。
+`credits[].id` のような識別子も落とす（判定に必要な集計値だけ残す）。
+"""
+import json
+import subprocess
+import sys
+import threading
+
+TIMEOUT_SECONDS = 5.0
+
+_METHODS_BY_TARGET = {
+    "ratelimits": [("account/rateLimits/read", {})],
+    "models": [("model/list", {})],
+}
+_METHODS_BY_TARGET["all"] = (
+    _METHODS_BY_TARGET["ratelimits"] + _METHODS_BY_TARGET["models"]
+)
+
+
+def _sanitize_ratelimits(result):
+    """判定に要る集計値だけを残し、識別子・トークン・残高を落とす。"""
+    result = result or {}
+    rl = result.get("rateLimits") or {}
+    primary = rl.get("primary") or {}
+    reset_credits = result.get("rateLimitResetCredits") or {}
+    return {
+        "rateLimitReachedType": rl.get("rateLimitReachedType"),
+        "spendControlReached": rl.get("spendControlReached"),
+        "planType": rl.get("planType"),
+        "primary": {
+            "usedPercent": primary.get("usedPercent"),
+            "windowDurationMins": primary.get("windowDurationMins"),
+            "resetsAt": primary.get("resetsAt"),
+        },
+        "resetCreditsAvailable": reset_credits.get("availableCount"),
+    }
+
+
+def _sanitize_models(result):
+    data = (result or {}).get("data") or []
+    out = []
+    for m in data:
+        efforts = [
+            e.get("reasoningEffort")
+            for e in (m.get("supportedReasoningEfforts") or [])
+        ]
+        out.append(
+            {
+                "id": m.get("id"),
+                "isDefault": m.get("isDefault"),
+                "defaultReasoningEffort": m.get("defaultReasoningEffort"),
+                "supportedReasoningEfforts": efforts,
+            }
+        )
+    return out
+
+
+_SANITIZERS = {
+    "account/rateLimits/read": _sanitize_ratelimits,
+    "model/list": _sanitize_models,
+}
+
+
+def fetch(target, timeout=TIMEOUT_SECONDS):
+    """target ("ratelimits" / "models" / "all") に対応するメソッドを呼び、
+    サニタイズ済みの結果を {method: value} で返す。応答が来ない・タイムアウト
+    した場合は TimeoutError、codex CLI が無ければ FileNotFoundError を送出する。
+    どちらの場合もプロセスは確実に kill してから戻る。
+    """
+    methods = _METHODS_BY_TARGET[target]
+
+    proc = subprocess.Popen(
+        ["codex", "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    results = {}
+    wanted = set(range(2, 2 + len(methods)))
+    done = threading.Event()
+
+    def reader():
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                mid = msg.get("id")
+                if mid in wanted:
+                    results[mid] = msg
+                    if set(results) >= wanted:
+                        done.set()
+                        return
+        except (ValueError, OSError):
+            # stdout がプロセス終了で閉じられた場合など。done は立てず
+            # 呼び出し側の timeout 待ちに委ねる。
+            pass
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {"name": "codex-ratelimits", "version": "1.0.0"}
+                },
+            }
+        )
+        send({"method": "initialized", "params": {}})
+        for i, (method, params) in enumerate(methods, start=2):
+            send({"id": i, "method": method, "params": params})
+
+        ok = done.wait(timeout=timeout)
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+    if not ok:
+        raise TimeoutError("codex app-server からの応答がタイムアウトしました")
+
+    out = {}
+    for i, (method, _) in enumerate(methods, start=2):
+        msg = results.get(i)
+        if msg is None or "result" not in msg:
+            out[method] = None
+            continue
+        sanitizer = _SANITIZERS.get(method, lambda r: r)
+        out[method] = sanitizer(msg["result"])
+    return out
+
+
+def _format_postflight_summary(rl):
+    reached = json.dumps(rl.get("rateLimitReachedType"))
+    parts = [f"rateLimitReachedType={reached}"]
+    used = rl.get("primary", {}).get("usedPercent")
+    if used is not None:
+        parts.append(f"primary.usedPercent={used}")
+    spend = json.dumps(rl.get("spendControlReached"))
+    parts.append(f"spendControlReached={spend}")
+    credits = rl.get("resetCreditsAvailable")
+    if isinstance(credits, int) and credits >= 1:
+        parts.append(
+            f"rateLimitResetCredits.availableCount={credits}"
+            "（クレジット消費で即時復帰可）"
+        )
+    return "codex-review: 枠の状態 — " + " / ".join(parts)
+
+
+def _run_postflight_summary():
+    # 失敗経路限定の情報強化であり、系列外レビューの成立条件ではない。
+    # 何が起きても例外を外へ投げず、静かに（空出力・終了コード 0 で）戻る。
+    try:
+        out = fetch("ratelimits")
+    except Exception:
+        return 0
+    rl = out.get("account/rateLimits/read")
+    if not rl:
+        return 0
+    print(_format_postflight_summary(rl))
+    return 0
+
+
+def main(argv):
+    target = argv[1] if len(argv) > 1 else "all"
+
+    if target == "postflight-summary":
+        return _run_postflight_summary()
+
+    if target not in _METHODS_BY_TARGET:
+        print(
+            f"usage: {argv[0]} [ratelimits|models|all|postflight-summary]",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        out = fetch(target)
+    except FileNotFoundError:
+        print("codex-ratelimits: codex CLI が見つかりません", file=sys.stderr)
+        return 127
+    except TimeoutError as e:
+        print(f"codex-ratelimits: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001 — 単体実行時は理由を必ず表示する
+        print(f"codex-ratelimits: 予期しないエラー: {e}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

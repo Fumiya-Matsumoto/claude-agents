@@ -27,6 +27,23 @@
 #
 set -uo pipefail
 
+# postflight: 失敗時のみ呼ぶ。account/rateLimits/read を読み、枠の状態を
+# stderr のメッセージへ添える。終了コードは変えない（意味論は呼び出し側の
+# 契約なので postflight は情報強化に留める）。python3 が無ければ・ヘルパが
+# 見つからなければ・応答が遅ければ、何もせず静かに戻る — postflight は
+# 失敗経路限定の情報強化であって系列外レビューの成立条件ではないため、
+# 「無ければ壊れる」依存にはしない（codex CLI 自体の扱いと同型）。
+postflight_ratelimits() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local self_dir helper summary
+  self_dir="$(dirname -- "$0")"
+  helper="${self_dir}/codex-ratelimits"
+  [ -f "$helper" ] || return 0
+  summary="$(python3 "$helper" postflight-summary 2>/dev/null)" || return 0
+  [ -n "$summary" ] && echo "$summary" >&2
+  return 0
+}
+
 if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
   echo "usage: codex-review \"<review target>\" < <acceptance criteria and observed facts>" >&2
   exit 2
@@ -80,6 +97,7 @@ status=$?
 if [ "$status" -ne 0 ]; then
   echo "codex-review: FAILED (exit ${status}) — 系列外レビューは成立していません" >&2
   tail -n 40 "$LOG" >&2
+  postflight_ratelimits
   exit "$status"
 fi
 
@@ -88,5 +106,6 @@ if [ -s "$OUT" ]; then
 else
   echo "codex-review: 出力が空です（exit 0 だが結果を取得できませんでした）" >&2
   tail -n 40 "$LOG" >&2
+  postflight_ratelimits
   exit 1
 fi
