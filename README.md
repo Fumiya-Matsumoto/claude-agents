@@ -153,9 +153,9 @@ codex exec review - \
 
 | エイリアス | 展開先 | ペイン |
 |---|---|---|
-| `cco` | `claude --agent orchestrator --effort max` | **O 管理**: 指示文発行・PR 検証・マージ・追跡専任。`orchestrator` の frontmatter により Opus で走る。effort はメインセッションで frontmatter が発火しないため、`--effort max` フラグで明示している。起動時に状況同期が自動で走る |
-| `ccd` | `claude --model fable --agent claude --effort high` | **D 決定**: 仕様策定・計画・敵対的検証。**規模を問わず計画はここ**。Fable をメインスレッドで使う唯一の入口。決定 1 件で使い捨て |
-| `ccw` | `claude -w` | **W 実装**: セッション専用 worktree で実装〜PR 作成。`ccw <name>` で worktree に名前も付けられる |
+| `cco` | `claude --permission-mode auto --agent orchestrator --effort max` | **O 管理**: 指示文発行・PR 検証・マージ・追跡専任。`orchestrator` の frontmatter により Opus で走る。effort はメインセッションで frontmatter が発火しないため、`--effort max` フラグで明示している。起動時に状況同期が自動で走る |
+| `ccd` | `claude --permission-mode auto --model fable --agent claude --effort high` | **D 決定**: 仕様策定・計画・敵対的検証。**規模を問わず計画はここ**。Fable をメインスレッドで使う唯一の入口。決定 1 件で使い捨て |
+| `ccw` | `claude --permission-mode auto -w` | **W 実装**: セッション専用 worktree で実装〜PR 作成。`ccw <name>` で worktree に名前も付けられる。`-w` は値を省略できる引数を取るため、必ず末尾に置く（`-w` より後ろに置いた引数だけが worktree 名として拾われる。フラグを `-w` より前に置かないと `ccw <name>` の `name` が worktree 名にならず、初回プロンプトとして送信されてしまう） |
 
 シングルペイン運用でも auto-router 単体で完結します（ペイン運用は任意）。
 
@@ -163,7 +163,7 @@ codex exec review - \
 
 **憲章は広く取り、深さは据え置き**（`--effort high`）。仕様化・計画・敵対的検証は規模を問わず D ペイン、難しいだけの実装・調査・デバッグは既定のメインセッションで足ります。「難しさで切る」と Opus 5 が Fable のピーク性能に肉薄している以上ほとんど D ペインを引かなくなるため、境界は難易度ではなく**仕事の種類**で引いています。
 
-> 既にインストール済みの環境では、エイリアスはシェル rc に**書き込み済み**です（install.sh はマーカーで冪等なので上書きしません）。`cco` / `ccd` の定義は rc 側を手で更新してください。
+> 既にインストール済みの環境では、エイリアスはシェル rc に**書き込み済み**です（install.sh はマーカーで冪等なので上書きしません）。`cco` / `ccd` / `ccw` の定義は rc 側を手で更新してください。
 
 ## インストール
 
@@ -179,14 +179,14 @@ cd claude-agents
 2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
 3. `bin/*` を `~/.claude/bin/` へ **symlink**（系列外レビューの起動スクリプト `codex-review`）
 4. `hooks/*` を `~/.claude/hooks/` へ **symlink**（`settings.json` から `"model"` を剥がし、`"effortLevel"` を `"xhigh"` に正規化する `claude-agents-strip-model.sh`。理由は後述の「注意」を参照）
-5. `~/.claude/settings.json` に `"agent": "auto-router"` と `"effortLevel": "xhigh"` を設定（要 jq、バックアップ作成。`effortLevel` が既にあり値が異なる場合は上書きしたうえで元の値を表示する）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。以降は Stop フックが `"model"` を剥がし `"effortLevel"` を `"xhigh"` へ正規化し直すため、`/model` と `/effort` はどちらも**恒久化しなくなる**（`/effort` の切替がセッション限りか 1 ターン限りかは未確認。「注意」節を参照）。`"model"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する
+5. `~/.claude/settings.json` に `"agent": "auto-router"` と `"effortLevel": "xhigh"` を設定（要 jq、バックアップ作成。`effortLevel` が既にあり値が異なる場合は上書きしたうえで元の値を表示する）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。以降は Stop フックが `"model"` を剥がし `"effortLevel"` を `"xhigh"` へ正規化し直すため、`/model` と `/effort` はどちらも**恒久化しなくなる**（`/effort` の切替がセッション限りか 1 ターン限りかは未確認。「注意」節を参照）。`"model"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する。同じ手順で `permissions.defaultMode` も `"auto"` に設定する（既存値が異なれば上書きしたうえで元の値を表示する）。`settings.json` は machine-local で配布されないためマシンごとに設定が要ること、`defaultMode: "auto"` は user settings（`~/.claude/settings.json`）でのみ有効でプロジェクト側の `.claude/settings.json` / `.claude/settings.local.json` に書かれた `auto` は Claude Code v2.1.142 以降無視されること、user settings は優先順位が最下位でプロジェクト側の `defaultMode` に負けうるためエイリアス側の `--permission-mode auto`（CLI フラグ、最優先）と二重に張っていること、の 3 点が理由（詳細は前節「ペイン運用」を参照）
 6. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
 7. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
 symlink 方式なので、**agents / skills / bin / hooks 本体の更新は `git pull` だけ**で全マシンに反映されます。ただし例外が 3 つあります。
 
 - **配布物が増えたとき**: `git pull` しても新しい symlink は張られません。系列外レビューの `bin/` は新しく増えた配布物なので、**既に導入済みのマシンでは `./install.sh` を 1 度だけ再実行してください**（冪等です）。再実行しない場合、`codex` が導入済みでもスクリプトが見つからず系列外レビューは走りません
-- **`install.sh` が `settings.json` / シェル rc に書き込む内容が変わったとき**: これも `git pull` だけでは反映されず、**`./install.sh` の再実行が必要**です（冪等です）。今回の変更（Stop フックが `"effortLevel"` を `"xhigh"` に正規化するようになった件）はこれに該当します。ただし**`cco` エイリアスは rc 側に既にマーカー付きブロックがある場合、install.sh は上書きせず警告と手動更新の案内を表示するだけです**（無断で rc を書き換えないため）。既にインストール済みの環境では、再実行後に表示される警告に従って `cco` エイリアスを手動で更新してください
+- **`install.sh` が `settings.json` / シェル rc に書き込む内容が変わったとき**: これも `git pull` だけでは反映されず、**`./install.sh` の再実行が必要**です（冪等です）。今回の変更（`cco` / `ccd` / `ccw` エイリアスへの `--permission-mode auto` の追加と、`settings.json` への `permissions.defaultMode` の設定）はこれに該当します。ただし**`cco` / `ccd` / `ccw` エイリアスは rc 側に既にマーカー付きブロックがある場合、install.sh は上書きせず警告と手動更新の案内を表示するだけです**（無断で rc を書き換えないため）。既にインストール済みの環境では、再実行後に表示される警告に従って `cco` / `ccd` / `ccw` エイリアスを手動で更新してください
 - **このリポジトリを移動・リネーム・削除したとき**: `~/.claude/` 配下の symlink は絶対パスで張られているので全部切れます。特に `hooks/` の symlink が切れると、Stop フックが**毎ターン stderr を出し続けます**（応答自体は壊れません）。移動先で **`./install.sh` を再実行**してください。もう使わない場合は下の「アンインストール」を実行してから消してください
 
 `CLAUDE_CONFIG_DIR` を設定している場合は、install.sh もフックもその値を設定ディレクトリとして使います（未設定なら `~/.claude`）。以下の説明では `~/.claude` と書きますが、設定していればそちらに読み替えてください。
@@ -223,6 +223,7 @@ npx skills@latest add mattpocock/skills
 - **model の真実の源は `agents/*.md` の frontmatter に一本化しています。** `settings.json` の `"model"` はメインセッションで frontmatter の `model` に**勝ちます**（実測: 優先順位は `--model` フラグ > `settings.json` > frontmatter）。`/model` などで書き込まれると割当が 2 箇所に分裂し、`settings.json` は machine-local で配布されないので必ずマシン間でズレます。Fable が必要な場面は `ccd` / `--model fable` / `/model` で明示指定する設計です。**`/model` はもともとそのセッション限りの切替という意味論のコマンドですが、実行すると `settings.json` に書き込まれて恒久化してしまいます。** install.sh は `hooks/claude-agents-strip-model.sh` を `Stop` フックとして登録し、セッションが応答を終えるたびに `"model"` を自動で剥がし、`"effortLevel"` を `"xhigh"` へ正規化します（毎ターン走りますが、書き込みが必要な場合 ―― `"model"` が残っている、または `"effortLevel"` が `"xhigh"` 以外のとき ―― に限って settings.json へ書き込みます）。これにより `/model` は名実ともにセッション限りの切替に戻ります（フック未導入のマシンや jq 未導入の場合の手動削除コマンドは後述の「インストール」節を参照）。`"effortLevel"` の正規化についての詳細は次項を参照してください。このリポジトリと無関係なプロジェクトの既定モデルや effortLevel まで書き換えられるのを避けたい場合は、環境変数 `CLAUDE_AGENTS_STRIP_MODEL=0` を設定するとフックは即座に何もせず終了します（model・effortLevel 両方のオプトアウトが同じスイッチに束ねられています）。**既知の制限**: jq 1.6 以前（Ubuntu 22.04 / Debian bullseye 標準の jq が該当）では大きい整数の精度が落ちる可能性があります。フックだけでなく **install.sh も `settings.json` 全体を jq で読み書きして丸ごと書き戻す**ので、同じリスクがあります（`agent` / `effortLevel` / Stop フック登録の 3 回）。`settings.json` に精度が重要な大きい数値を手動で置いている場合は、環境の jq バージョンを確認してください。**もう 1 つの既知の制限**: フックは書き戻す直前に `settings.json` の mtime・サイズ・inode を取り直し、読み出した時点と一致する場合だけ置き換えます（compare-and-swap）。これで「フックが読んでから書くまでの間に Claude Code 本体が `/config` 等で書いた内容が丸ごと巻き戻る」事故は塞げますが、**完全ではありません** — mtime の粒度が 1 秒までのファイルシステムで、同一秒内に同じサイズのまま in-place 書き換えが起きた場合は検出できません（一時ファイル + rename で書くプロセスは inode が変わるので検出できます）。検出した場合フックは何もせずに降り、次のターンで再試行します。**フックが取るロック（`~/.claude/.strip-model.lock`）は相互排他の保証ではありません** — 60 秒より古いロックの奪取が生きたロックを掴んだ場合や、猶予時間を超えるプロセス停止（SIGSTOP・スリープ復帰）が挟まった場合には、2 つのフックが同時に走りえます。POSIX シェルに「inode が一致するときだけ削除する」原子操作が無いため原理的に閉じられない残余で、ロックは競合を減らすためだけのものです。**安全性を担保しているのは上記の compare-and-swap の方**で、ロックが失われても `settings.json` は壊れません（後着の書き込みが弾かれ、次のターンで再試行されます）。CAS が入った以上ロック自体を廃止できるのではないか、という検討は issue #39 で追跡しています
 - **effort の真実の源は model と違い、経路で分かれます（次項の実測順位が根拠）。** サブエージェント 8 体は `settings.json` の `effortLevel` に潰されないため、frontmatter が唯一の指定手段です。一方メインセッション 2 体（`auto-router` / `orchestrator`）は frontmatter の `effort` がそもそも発火しないため、`settings.json` の `effortLevel` と起動時の `--effort` フラグが実効値を決めます。ただし**「唯一の手段」は言い過ぎです** — `settings.json` の `effortLevel` は project 階層のものが global（`~/.claude/settings.json`）に**勝つ**ため、プロジェクト側の `.claude/settings.json` に `effortLevel` を置けばそちらが実効します。また **`settings.json` の `effortLevel` は enum が `low` / `medium` / `high` / `xhigh` に限定されており `"max"` を表現できません**（不正値は黙って捨てられます）。`orchestrator` を `max` で走らせるために `cco` エイリアス側で `--effort max` フラグが必須なのはこのためです。**model と非対称なのはここが理由です** — model は「settings.json から剥がせば frontmatter に一本化される」という設計が成立しますが、effort はメインセッションに frontmatter という指定手段自体が存在しないため、単純に剥がすとメインセッション 2 体の effort を誰も制御できなくなります。したがって install.sh が `"effortLevel": "xhigh"` を能動的に設定したうえで、`hooks/claude-agents-strip-model.sh` が毎ターンそれを `"xhigh"` へ正規化し直します。`/effort` はセッション中いつでも打てますが、次の応答完了時に `settings.json` の値が `"xhigh"` へ戻るため、**その値が以後のセッションへ持ち越されることはありません**。**未確認**: 実行中のセッションの実効 effort が、フックの書き戻し後もそのターンの指定を保つのか、次のターンで `"xhigh"` に戻るのかは未検証です（バイナリには settings 再読込のサブスクライバと `/effort` が直接更新する UI 状態の両方があり、ターンごとのリクエストがどちらを見るか未追跡）。したがって切替の射程は「セッション限り」か「1 ターン限り」のどちらかで、**恒久化しないことだけが確定しています**。`orchestrator` だけ `max` で走らせたい場合は、`--effort` フラグが `effortLevel` に勝つ性質を使い、`cco` エイリアス側で `--effort max` を明示的に上書きします（前節「ペイン運用」を参照）
 - **effort の優先順位は実測で確定しています（2026-07-30）: `--effort` フラグ > `settings.json` の `effortLevel` > frontmatter の `effort`。** メインセッションでは frontmatter の `effort` は発火しません（`effortLevel: low` を置くと、frontmatter が `high` の `auto-router` が `low` で起動する）。フラグはそれに勝ちます（同条件で `--effort max` は `max` で起動する）。一方 **サブエージェント経路では frontmatter が発火し、`settings.json` に潰されません**（同条件で `code-explorer` は frontmatter どおり `high` で起動する）。したがって**サブエージェント 8 体の effort は frontmatter が唯一の指定手段**であり、**メインセッション 2 体は `settings.json` の `effortLevel` と起動時フラグが実効値を決めます**。frontmatter にも同じ値を書いてあるのは、この 2 体がサブエージェントとして起動された場合に効かせるためです
+- **`permissions.defaultMode` も machine-local な設定です。** `settings.json` は `~/.claude` 全体（マシン全体）に効くため、install.sh が設定する `permissions.defaultMode: "auto"` は、このリポジトリと無関係なプロジェクトのセッションにも影響します（`model` / `effortLevel` と同じ設計上の理由）。ただし auto mode は `bypassPermissions` とは別物です — 分類器が各ツール呼び出しごとにリスクを評価し、低リスクと判定したものだけを自動実行し、残りは通常どおりブロックする仕組みであって、全許可ではありません。この書き込みだけを無効化したい場合は、環境変数 `CLAUDE_AGENTS_SET_DEFAULT_MODE=0` を設定してください（`CLAUDE_AGENTS_STRIP_MODEL=0` と同じ発想・作法のオプトアウトです）。
 - auto-router に `tools:` 許可リストを**意図的に付けていません**。付けると MCP ツール・Skill・Workflow がメインセッションから使えなくなるためです（許可リストは排他的）。ルーティング規律はプロンプトで担保しています
 - **`/context` は `--agent` セッションで誤った値を表示します。** `/context` の呼び出し元がシステムプロンプト合成関数に `mainThreadAgentDefinition` を渡していないため、**実際には送信されていない**デフォルトプロンプト（`O3()` の全ブロック）のトークン数と内訳が表示されます。`auto-router` / `orchestrator` のセッションで見ると system prompt のサイズを大幅に過大評価することになります。ハーネス側の取りこぼしなのでこのリポジトリでは修正できません
 - **`maxTurns` は全エージェントから外しました。** 以前は 20〜60 の上限を 8 体に付けていましたが、上限に達したエージェントは報告見出しがひとつも無い断片を `status: completed` として返すため、**呼び出し側が成果物を能動的に確認しない限り成功と誤読されます**。1 セッションで 5 回の打ち切りが観測され、うち 1 件は破壊的な検証手順の復元前に切られて欠陥が作業ツリーに残りました。外した決め手は配置です — 上限が無かったのは `auto-router` / `orchestrator`、つまり**タスクによる自然な終端を持たないメインセッション 2 体だけ**で、保護がリスクと逆向きに掛かっていました。暴走の記録は Issue 上に 1 件もありません
@@ -293,7 +294,7 @@ Fable 5 には全面停止の実績があり（2026-06 に約 3 週間、輸出�
 | `agents/frontier-orchestrator.md` | `model: opus` / `effort: max` |
 | `agents/frontier-solver.md` | `model: opus` / `effort: max` |
 | `agents/frontier-reviewer.md` | `model: opus` / `effort: max` |
-| `ccd`（エイリアスは rc 側にあり repo 管理外） | `claude --model opus --agent claude --effort high` を直打ち |
+| `ccd`（エイリアスは rc 側にあり repo 管理外） | `claude --permission-mode auto --model opus --agent claude --effort high` を直打ち |
 
 **commit しないのが要点です。** agents は symlink 配布なので作業ツリーを直接編集すれば即反映され、dirty な作業ツリーと `git status` がそのまま「今フォールバック中」の常時インジケータになります。main には意図した割当だけを残し、**復帰は `git checkout -- agents/` の 1 コマンド**（`claude --model fable -p 'ok'` が通ったら実行）。
 
@@ -347,16 +348,27 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 #    「成功したように見える」
 cd /path/to/claude-agents
 
-# 1. settings.json から "agent" キー・"effortLevel" キーと Stop フックの登録
-#    エントリを削除（symlink を先に消すと、切れた symlink をフックが毎ターン
-#    叩く状態が残るため必ず先に実行する）
+# 1. settings.json から "agent" キー・"effortLevel" キー・"permissions.defaultMode"
+#    キーと Stop フックの登録エントリを削除（symlink を先に消すと、切れた
+#    symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
 #    settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らず
 #    リンク自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに
 #    一時ファイルを作って書き戻す
-#    注意: del(.agent, .effortLevel) はハーネスの既定値に戻すだけであり、
-#    インストール前にユーザーが settings.json に置いていた元の値には戻らない。
-#    元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
-#    に残っているので、必要ならそこから手動で復元すること
+#    注意: del(.agent, .effortLevel) および permissions.defaultMode の削除は
+#    ハーネスの既定値に戻すだけであり、インストール前にユーザーが settings.json
+#    に置いていた元の値には戻らない。元の値は install.sh が作成した
+#    ~/.claude/settings.json.bak.<タイムスタンプ> に残っているので、必要なら
+#    そこから手動で復元すること。permissions.defaultMode は .permissions から
+#    その 1 キーだけを消し、ユーザーが元から持っていた .permissions.allow 等の
+#    兄弟キーは残す。削除の結果 .permissions が空オブジェクトになった場合のみ
+#    .permissions 自体も消す（インストール前が {"permissions":{}} のように
+#    defaultMode 以外のキーを 1 つも持たない状態だった環境でも同様で、この場合
+#    .permissions キー自体が消える）
+#    注意: CLAUDE_AGENTS_SET_DEFAULT_MODE=0 でインストールした環境では install.sh が
+#    permissions.defaultMode に一切触れていないため、この手順をそのまま実行すると
+#    インストール前からユーザー自身が置いていた defaultMode の設定まで消えてしまう。
+#    該当する場合は、下の jq 式のうち permissions.defaultMode を削除する節を外してから
+#    実行すること。
 #    全体を ( ) のサブシェルに入れてあるのは、作業用の変数を対話シェルに
 #    残さないため。失敗時はメッセージを出して settings.json を変更せずに抜ける
 (
@@ -377,7 +389,12 @@ cd /path/to/claude-agents
   real="$dir/$(basename "$target")"
   [ -f "$real" ] || { echo "settings.json の実体が見つかりません: $real" >&2; exit 1; }
   tmp="$(mktemp "$dir/.settings.json.uninstall.XXXXXX")" || exit 1
-  if jq 'del(.agent, .effortLevel) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
+  if jq 'del(.agent, .effortLevel)
+      | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))
+      | if (.permissions? | type) == "object" then
+          (.permissions |= del(.defaultMode))
+          | if (.permissions | length) == 0 then del(.permissions) else . end
+        else . end' \
       "$real" > "$tmp"; then
     mv "$tmp" "$real"
   else
