@@ -90,16 +90,24 @@ initialPrompt: |
    並びや過去の例から推測しない
 2. **指示文はファイルに書く。** パスは毎回一意にする:
 
-       mktemp /tmp/handoff-<topic>-XXXXXX.md
+       mktemp /tmp/handoff-<topic>-XXXXXX
 
+   **テンプレートは `XXXXXX` で終える。拡張子を付けてはならない。**
+   `handoff-<topic>-XXXXXX.md` のように末尾以外へ X 列を置くと、BSD mktemp（macOS）は
+   X を置換せずリテラルの固定名を作り、2 回目以降は `mkstemp failed: File exists` で
+   失敗する。GNU mktemp は最初から `too few X's in template` で落ちる。どちらでも
+   「毎回一意」が崩れる。拡張子が要るなら
+   `f=$(mktemp /tmp/handoff-<topic>-XXXXXX) && mv "$f" "$f.md"`。
    トピック名だけで固定すると、同じ話題を扱う別セッションや、受信側が読む前の再投入で
    衝突する。投げっぱなし運用では後の書き込みが先のファイルを黙って上書きし、受信ペインが
    **別タスクの指示を読む**。
-   **ペインへ複数行を直接送ってはならない。** herdr 0.7.4 の送信系は `pane run`
-   （本文 + Enter）・`pane send-text` / `pane send-keys`（低レベル）・`agent send`
-   （Enter なし）で、**どれもブラケットペーストを解釈しない**（それを行う `agent prompt`
-   は 0.7.4 に無い）。改行はそのまま送信になり、指示文が 1 行目で千切れる。使ってよいのは
-   `pane run` に 1 行だけ
+   **ペインへ複数行を直接送ってはならない。** herdr 0.7.5 の送信系は `pane run`
+   （本文 + Enter）・`pane send-text` / `pane send-keys`（低レベル）・`agent send-keys`
+   （Enter なし）で、**どれもブラケットペーストを解釈しない**。改行はそのまま送信になり、
+   指示文が 1 行目で千切れる。使ってよいのは `pane run` に 1 行だけ。
+   `agent prompt <TARGET> <TEXT>` は 0.7.5 に実在するが**使わない** — 本文を引数で直接
+   取るため、長い指示文ではシェルのクォート・改行事故を招く。ファイルに書いて `pane run`
+   で 1 行渡す迂回は、動詞が無いからではなく、その事故を避けるための選択である
 3. **投入前に確認を取る。** 宛先の `pane_id` と役割と `cwd`、指示文ファイルの絶対パス、
    実際に打つ herdr コマンドそのものを提示して GO をもらう。確認なしの投入は禁止
 4. **投げっぱなしにする。** GO の直後、**投入の直前にもう一度状態を確認する**:
@@ -152,14 +160,14 @@ D は対話で詰める場であって、あなたが結論まで走らせる場
 成立しない）。`-w` は worktree 名を省略可能な引数として取るので、**`-w` の後ろにフラグを
 置かない**。
 
-安定名が使えるのは **`herdr agent *`（`agent get` / `agent read` / `agent send`）だけ**で、
+安定名が使えるのは **`herdr agent *`（`agent get` / `agent read` / `agent send-keys`）だけ**で、
 `herdr pane run` は `pane_id` しか受け付けない（名前を渡すと `pane_not_found`）。投入時は
 毎回 `herdr agent list` から `pane_id` を読み直す。
 
 禁止（コマンド名ではなく性質で読むこと）: 確認なしの投入、`idle` / `done` 以外のペインへの
 投入、複数行の直接送信、**`pane run` 以外の手段で他人のペインへ入力・キーを送ること**
-（0.7.4 の CLI では `pane send-text` / `pane send-keys` / `agent send` が該当。ソケット API
-には `pane.send_input` もあるが CLI 動詞は無い）、`agent attach --takeover`、自分が作って
+（0.7.5 の CLI では `pane send-text` / `pane send-keys` / `agent send-keys` / `agent prompt`
+が該当。ソケット API には `pane.send_input` もあるが CLI 動詞は無い）、`agent attach --takeover`、自分が作って
 いないペイン・タブ・workspace の close（`pane close` / `tab close` / `workspace close`）、
 `herdr server stop`。
 
