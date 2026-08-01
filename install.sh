@@ -205,8 +205,8 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # "low"/"medium"/"high"/"xhigh" に限定されており "max" は存在しない
     # （不正値は黙って捨てられる）。orchestrator を "max" で走らせるには
     # settings.json ではなく --effort フラグが必須なのはこのため（cco
-    # エイリアス側で --effort max を明示している。後段「6. ペイン起動
-    # エイリアス」を参照）。
+    # エイリアス側で --effort max を明示している。README の「ペイン運用」を
+    # 参照）。
     prev_effort="$(jq -r 'if has("effortLevel") then (.effortLevel|tojson) else empty end' "$SETTINGS" 2>/dev/null || true)"
     tmp="$(mktemp_settings "$SETTINGS_DIR")"
     if [ -z "$tmp" ]; then
@@ -226,39 +226,70 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
 
     # permissions.defaultMode を "auto" に設定する。理由は 3 つ:
     # (1) settings.json は machine-local でこのリポジトリから配布されないため、
-    #     新しいマシンでは auto mode が既定にならず、ペインを開くたびに
-    #     shift+tab で入れ直す手間が残る。install.sh は各マシンで必ず実行
-    #     されるので、ここで能動的に設定する。
+    #     マシンごとの既定値には依存できない。install.sh は各マシンで必ず
+    #     実行されるので、ここで能動的に設定し、ペインを開くたびに shift+tab
+    #     で入れ直す手間を消す。
     # (2) defaultMode: "auto" は user settings（~/.claude/settings.json）でのみ
     #     有効。Claude Code v2.1.142 以降、プロジェクト側の .claude/settings.json
     #     / .claude/settings.local.json に書かれた "auto" は無視される（リポジ
     #     トリが自分自身に auto を付与できないようにするための制限）。
     # (3) settings の優先順位は user settings が最下位で、プロジェクト側の
     #     defaultMode に負けうる。そのためエイリアス側の --permission-mode
-    #     auto（CLI フラグ、最優先）と二重に張っている（「6. ペイン起動
-    #     エイリアス」を参照）。ここは保険であり唯一の手段ではない。
+    #     auto（CLI フラグ、最優先）と二重に張っている（「ペイン運用」を
+    #     参照）。ここは保険であり唯一の手段ではない。
     # 既に値があり "auto" と異なる場合は上書きし、元の値を明示する
-    # （effortLevel と同じ作法）。.permissions がオブジェクトでない・存在
-    # しない場合でも jq がエラーにならないよう、type チェックで安全に拾う。
-    prev_default_mode="$(jq -r '
-      if (.permissions | type) == "object" and (.permissions | has("defaultMode"))
-      then (.permissions.defaultMode | tojson)
-      else empty end
-    ' "$SETTINGS" 2>/dev/null || true)"
-    tmp="$(mktemp_settings "$SETTINGS_DIR")"
-    if [ -z "$tmp" ]; then
-      echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。"permissions.defaultMode" の設定をスキップします。手動で追加してください。'
-    elif jq '.permissions.defaultMode = "auto"' "$SETTINGS" > "$tmp"; then
-      preserve_mode "$SETTINGS" "$tmp"
-      mv "$tmp" "$SETTINGS"
-      if [ -n "$prev_default_mode" ] && [ "$prev_default_mode" != '"auto"' ]; then
-        echo "settings.json: \"permissions.defaultMode\": \"auto\" を設定（元の値 ${prev_default_mode} を上書き）"
-      else
-        echo 'settings.json: "permissions.defaultMode": "auto" を設定'
-      fi
+    # （effortLevel と同じ作法）。
+    # 注意: settings.json はグローバル（~/.claude/settings.json）な設定ファイル
+    # なので、この permissions.defaultMode はマシン全体に効く。このリポジトリ
+    # と無関係なプロジェクトのセッションにも影響する（README の "model" に
+    # 関する注意書きと同じ設計上の理由）。ただし auto mode は
+    # bypassPermissions とは別物である点に注意 —— 分類器が各ツール呼び出し
+    # ごとにリスクを評価し、低リスクと判定したものだけを自動実行し、残りは
+    # 通常どおりブロックする仕組みであって、全許可ではない。
+    # 無効化: 環境変数 CLAUDE_AGENTS_SET_DEFAULT_MODE=0 を設定すると、この
+    # permissions.defaultMode の書き込みだけをスキップする（このリポジトリと
+    # 無関係なプロジェクトでも権限モードの既定値を書き換えてしまうことへの
+    # オプトアウト手段。命名と作法は CLAUDE_AGENTS_STRIP_MODEL=0
+    # （hooks/claude-agents-strip-model.sh）の先例に合わせる）。
+    if [ "${CLAUDE_AGENTS_SET_DEFAULT_MODE:-}" = "0" ]; then
+      echo 'settings.json: CLAUDE_AGENTS_SET_DEFAULT_MODE=0 のため "permissions.defaultMode" の設定をスキップしました'
     else
-      rm -f "$tmp"
-      echo '⚠ settings.json への "permissions.defaultMode" 設定に失敗しました（jq エラー）。手動で追加してください。'
+      # .permissions がオブジェクトでない・存在しない場合でも jq がエラーに
+      # ならないよう、書き込み前に型を判定する。存在しない（null）か object
+      # のときだけ書き込み、それ以外（配列等）のときは jq の生エラーを表に
+      # 出さず、専用の警告と手動対応の案内だけを出す（settings.json を壊さ
+      # ないという性質は維持する。空文字列＝型判定自体が失敗した場合は、
+      # 従来どおり書き込みを試みて jq のエラーハンドリングに委ねる）。
+      permissions_type="$(jq -r '.permissions | type' "$SETTINGS" 2>/dev/null || true)"
+      case "$permissions_type" in
+        object|null|'')
+          prev_default_mode="$(jq -r '
+            if (.permissions | type) == "object" and (.permissions | has("defaultMode"))
+            then (.permissions.defaultMode | tojson)
+            else empty end
+          ' "$SETTINGS" 2>/dev/null || true)"
+          tmp="$(mktemp_settings "$SETTINGS_DIR")"
+          if [ -z "$tmp" ]; then
+            echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。"permissions.defaultMode" の設定をスキップします。手動で追加してください。'
+          elif jq '.permissions.defaultMode = "auto"' "$SETTINGS" > "$tmp"; then
+            preserve_mode "$SETTINGS" "$tmp"
+            mv "$tmp" "$SETTINGS"
+            if [ -n "$prev_default_mode" ] && [ "$prev_default_mode" != '"auto"' ]; then
+              echo "settings.json: \"permissions.defaultMode\": \"auto\" を設定（元の値 ${prev_default_mode} を上書き）"
+            else
+              echo 'settings.json: "permissions.defaultMode": "auto" を設定'
+            fi
+          else
+            rm -f "$tmp"
+            echo '⚠ settings.json への "permissions.defaultMode" 設定に失敗しました（jq エラー）。手動で追加してください。'
+          fi
+          ;;
+        *)
+          echo "⚠ settings.json の \"permissions\" がオブジェクトではありません（型: ${permissions_type}）。"
+          echo '  壊さないために "permissions.defaultMode" の自動設定はスキップします。手動で'
+          echo '  "permissions" をオブジェクトに直したうえで "defaultMode": "auto" を追加してください。'
+          ;;
+      esac
     fi
 
     # Stop フックへ claude-agents-strip-model.sh を追記登録する。既存の Stop
@@ -406,7 +437,8 @@ elif [ -z "$SETTINGS_DIR" ]; then
   : # 実体パスを解決できなかった旨は上ですでに警告済み
 else
   echo '⚠ jq が見つかりません。settings.json に手動で "agent": "auto-router" と "effortLevel": "xhigh" を'
-  echo '  追加してください。また Stop フックも手動登録が必要です（claude-agents-strip-model.sh を参照）。'
+  echo '  追加してください。また "permissions": { "defaultMode": "auto" } の追加と、Stop フックの手動登録も'
+  echo '  必要です（claude-agents-strip-model.sh を参照）。'
 fi
 
 # 6. ペイン起動エイリアス
@@ -420,33 +452,39 @@ if ! grep -qF "$MARKER" "$RC" 2>/dev/null; then
   cat >> "$RC" << EOF
 
 $MARKER
-alias cco='claude --agent orchestrator --effort max --permission-mode auto'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
-alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'        # Decision ペイン（素の Fable で意思決定）
-alias ccw='claude -w --permission-mode auto'                                                # Worker ペイン（worktree 自動作成）
+alias cco='claude --permission-mode auto --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
+alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）
+alias ccw='claude --permission-mode auto -w'                                                # Worker ペイン（worktree 自動作成）
 $MARKER_END
 EOF
   echo "aliases: ${RC} に追加しました（source ${RC} で有効化）"
 else
   echo "aliases: 設定済み（スキップ）"
   # 既存ブロックがある場合、install.sh は MARKER の有無だけで判定して冪等に
-  # している（rc は書き換えない）ため、cco が --effort max を含まない古い
-  # ブロックのままだと再実行しても更新されない。--effort フラグは
+  # している（rc は書き換えない）ため、cco / ccd / ccw が期待するフラグを
+  # 含まない古いブロックのままだと再実行しても更新されない。--effort フラグは
   # settings.json の effortLevel に勝つ唯一の手段なので、放置すると
-  # orchestrator の意図した effort（max）が実効しない。ユーザーの rc を
-  # 無断で書き換えるのは避け、警告と手動更新の案内に留める。
-  # 判定は rc ファイル全体から最後に現れる `alias cco=` 定義を採る。シェル
+  # orchestrator の意図した effort（max）が実効しない。--permission-mode auto
+  # フラグが無いと、そのペインは既定の権限モードで開き shift+tab の入れ直しが
+  # 要る。ユーザーの rc を無断で書き換えるのは避け、警告と手動更新の案内に
+  # 留める。
+  # 判定は rc ファイル全体から最後に現れる `alias <name>=` 定義を採る。シェル
   # は同名 alias の最後の定義が有効になる（後勝ち）ため、マーカーブロック
-  # より後ろにユーザー独自の `alias cco=` があるとそちらが実効する。
+  # より後ろにユーザー独自の `alias <name>=` があるとそちらが実効する。
   # マーカーブロック内だけを走査すると、ブロックより後ろの定義（実際に
   # 有効な方）を無視してブロック内の（実効していない）定義を見てしまう
   # 偽陽性が実機で再現している。逆にブロック外に古い定義がある場合を
-  # 拾えない偽陰性も同様に実機で再現している。
-  # ブロック内・ブロック外のどちらにも `alias cco=` が 1 つも無い場合も
+  # 拾えない偽陰性も同様に実機で再現している。この対策は cco / ccd / ccw の
+  # 3 行それぞれで独立に行う。
+  # ブロック内・ブロック外のどちらにも `alias <name>=` が 1 つも無い場合も
   # 「古い」として扱う（下の case のデフォルト分岐が拾う）。
-  # 陳腐化の判定軸はフラグごとに独立している。欠けているフラグごとに 1 行ずつ
-  # 警告を出し、どれが欠けているかを行単位で読めるようにする（連結して 1 行に
-  # まとめると、片方だけ欠けた rc と両方欠けた rc を文面で区別できなくなる）。
+  # 陳腐化の判定軸はエイリアスごと・フラグごとに独立している。欠けている
+  # ものごとに 1 行ずつ警告を出し、どれが欠けているかを行単位で読めるように
+  # する（連結して 1 行にまとめると、片方だけ欠けた rc と両方欠けた rc を
+  # 文面で区別できなくなる）。
   cco_line="$(grep -F 'alias cco=' "$RC" 2>/dev/null | tail -n1 || true)"
+  ccd_line="$(grep -F 'alias ccd=' "$RC" 2>/dev/null | tail -n1 || true)"
+  ccw_line="$(grep -F 'alias ccw=' "$RC" 2>/dev/null | tail -n1 || true)"
   alias_stale=''
   case "$cco_line" in
     *'--effort max'*) : ;;
@@ -466,14 +504,32 @@ else
       echo '  残ります。'
       ;;
   esac
+  case "$ccd_line" in
+    *'--permission-mode auto'*) : ;;
+    *)
+      alias_stale=1
+      echo "⚠ ${RC} の ccd エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
+      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
+      echo '  残ります。'
+      ;;
+  esac
+  case "$ccw_line" in
+    *'--permission-mode auto'*) : ;;
+    *)
+      alias_stale=1
+      echo "⚠ ${RC} の ccw エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
+      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
+      echo '  残ります。'
+      ;;
+  esac
   if [ -n "$alias_stale" ]; then
     echo "  rc の自動書き換えはしないので、下記のブロックで ${MARKER} 〜 ${MARKER_END} を"
     echo '  手動で置き換えてください:'
     echo ''
     echo "  $MARKER"
-    echo "  alias cco='claude --agent orchestrator --effort max --permission-mode auto'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
-    echo "  alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'        # Decision ペイン（素の Fable で意思決定）"
-    echo "  alias ccw='claude -w --permission-mode auto'                                                # Worker ペイン（worktree 自動作成）"
+    echo "  alias cco='claude --permission-mode auto --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
+    echo "  alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）"
+    echo "  alias ccw='claude --permission-mode auto -w'                                                # Worker ペイン（worktree 自動作成）"
     echo "  $MARKER_END"
   fi
 fi
