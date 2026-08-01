@@ -107,6 +107,10 @@ case_t51_default_mode_opt_out() {
   assert_contains "t51 スキップした旨を表示する" "$INSTALL_OUT" "CLAUDE_AGENTS_SET_DEFAULT_MODE=0"
   assert_eq "t51 agent は設定される" "$(jq -r '.agent' "$s")" "auto-router"
   assert_eq "t51 effortLevel は設定される" "$(jq -r '.effortLevel' "$s")" "xhigh"
+  # permissions.defaultMode のオプトアウトは Stop フック登録の if/else の外に
+  # あるため巻き添えにならないはずだが、その不変条件がテストで固定されていな
+  # かった（オプトアウトしても Stop フックは登録されることを確認する）
+  assert_eq "t51 Stop フックは登録される" "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "1"
 }
 
 # ---------------------------------------------------------------- CLAUDE_CONFIG_DIR
@@ -443,9 +447,9 @@ EOF
 case_t42_alias_current_block_quiet() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --agent orchestrator --effort max --permission-mode auto'
-alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'
-alias ccw='claude -w --permission-mode auto'
+alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'
+alias ccw='claude --permission-mode auto -w'
 # <<< claude-agents aliases <<<
 EOF
   run_install
@@ -470,7 +474,11 @@ EOF
   assert_eq "t42b 終了ステータス" "$INSTALL_STATUS" "0"
   assert_contains "t42b permission-mode の欠落を警告する" "$INSTALL_OUT" "--permission-mode auto がありません"
   assert_not_contains "t42b effort は警告しない" "$INSTALL_OUT" "--effort max がありません"
-  assert_contains "t42b 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
+  # 正本ブロックと警告時の置換用ブロックのドリフト検出（cco / ccd / ccw の
+  # 3 行とも、置換用の案内が正本と文字列一致していることを固定する）
+  assert_contains "t42b 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort max'"
+  assert_contains "t42b 置換用ブロックを提示する（ccd）" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
+  assert_contains "t42b 置換用ブロックを提示する（ccw）" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
 }
 
 # --effort max だけを既に持つ cco と異なり、ccd / ccw の 2 行だけが古い
@@ -489,8 +497,53 @@ EOF
   assert_not_contains "t42c cco の --effort max は警告しない" "$INSTALL_OUT" "cco エイリアスに --effort max がありません"
   assert_not_contains "t42c cco の --permission-mode auto は警告しない" "$INSTALL_OUT" "cco エイリアスに --permission-mode auto がありません"
   assert_contains "t42c ccd の欠落を警告する" "$INSTALL_OUT" "ccd エイリアスに --permission-mode auto がありません"
-  assert_contains "t42c ccw の欠落を警告する" "$INSTALL_OUT" "ccw エイリアスに --permission-mode auto がありません"
-  assert_contains "t42c 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
+  # ccw の判定は単純な有無ではなく引数順の検査なので、警告文言も専用の形になる
+  assert_contains "t42c ccw の欠落を警告する" "$INSTALL_OUT" "ccw エイリアスの引数順が古い、または --permission-mode auto がありません"
+  # 正本ブロックと警告時の置換用ブロックのドリフト検出（cco / ccd / ccw の
+  # 3 行とも、置換用の案内が正本と文字列一致していることを固定する）
+  assert_contains "t42c 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort max'"
+  assert_contains "t42c 置換用ブロックを提示する（ccd）" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
+  assert_contains "t42c 置換用ブロックを提示する（ccw）" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
+}
+
+# ccw の旧い引数順（-w が --permission-mode auto より前）を入力とする。
+# --permission-mode auto の有無だけを見る単純な部分文字列検査だと、この壊れた
+# 順序を「現行」と誤判定してしまう（受入条件 A）。順序の警告が出ることと、
+# cco / ccd は警告しないこと、置換用ブロックが提示されることを固定する。
+case_t42d_alias_ccw_wrong_order() {
+  cat > "${HOME}/.bashrc" <<'EOF'
+# >>> claude-agents aliases >>>
+alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'
+alias ccw='claude -w --permission-mode auto'
+# <<< claude-agents aliases <<<
+EOF
+  run_install
+  assert_eq "t42d 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_not_contains "t42d cco は警告しない" "$INSTALL_OUT" "cco エイリアスに"
+  assert_not_contains "t42d ccd は警告しない" "$INSTALL_OUT" "ccd エイリアスに"
+  assert_contains "t42d ccw の引数順を警告する" "$INSTALL_OUT" "ccw エイリアスの引数順が古い、または --permission-mode auto がありません"
+  assert_contains "t42d 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
+}
+
+# ccd から --agent claude だけを落とした rc。--agent claude が無いと D ペインは
+# 「Fable の上に auto-router を着せた」セッションになる（README の「ペイン運用」
+# を参照）ため、他のフラグと独立に検査されることを確かめる（受入条件 B）。
+case_t42e_alias_ccd_missing_agent_claude() {
+  cat > "${HOME}/.bashrc" <<'EOF'
+# >>> claude-agents aliases >>>
+alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias ccd='claude --permission-mode auto --model fable --effort high'
+alias ccw='claude --permission-mode auto -w'
+# <<< claude-agents aliases <<<
+EOF
+  run_install
+  assert_eq "t42e 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_not_contains "t42e cco は警告しない" "$INSTALL_OUT" "cco エイリアスに"
+  assert_not_contains "t42e ccd の permission-mode は警告しない" "$INSTALL_OUT" "ccd エイリアスに --permission-mode auto がありません"
+  assert_not_contains "t42e ccw は警告しない" "$INSTALL_OUT" "ccw エイリアスの引数順が古い"
+  assert_contains "t42e ccd の --agent claude 欠落を警告する" "$INSTALL_OUT" "ccd エイリアスに --agent claude がありません"
+  assert_contains "t42e 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
 }
 
 # ---------------------------------------------------------------- README
@@ -668,4 +721,27 @@ case_t49_uninstall_drops_empty_permissions() {
   assert_eq "t49 アンインストールの終了ステータス" "$status" "0"
   assert_eq "t49 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
   assert_eq "t49 permissions キー自体が消える" "$(jq -r 'has("permissions")' "$s")" "false"
+}
+
+# t49 は permissions キー自体が無い入力だった。ここではインストール前から
+# {"permissions":{}}（空オブジェクト）が置かれていた入力で同じ性質（削除の
+# 結果 .permissions が空になったら .permissions 自体も消す）を検証する
+# （受入条件 E3。README がこの挙動を明記している一方、その入力のケースが
+# 存在しなかった）
+case_t52_uninstall_drops_preexisting_empty_permissions() {
+  local s="${HOME}/.claude/settings.json" snippet="${SANDBOX}/uninstall.sh" status
+  write_settings "$s" '{"permissions":{}}'
+  run_install
+  assert_eq "t52 install の終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t52 defaultMode が auto になる" "$(jq -r '.permissions.defaultMode' "$s")" "auto"
+  if ! extract_uninstall_snippet "$snippet"; then
+    fail "t52: README からアンインストール手順を抽出できない"
+    return
+  fi
+  assert_sandboxed_home
+  bash "$snippet" >"${SANDBOX}/uninstall.out" 2>"${SANDBOX}/uninstall.err"
+  status=$?
+  assert_eq "t52 アンインストールの終了ステータス" "$status" "0"
+  assert_eq "t52 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
+  assert_eq "t52 permissions キー自体が消える" "$(jq -r 'has("permissions")' "$s")" "false"
 }

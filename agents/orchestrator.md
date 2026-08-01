@@ -88,12 +88,18 @@ initialPrompt: |
    **今後 herdr が追加する未知の値には投げない**（入力が混ざって相手の作業を壊す）。
    対象プロジェクトは `cwd` と `workspace_id` で絞る。ID は JSON から読む。サイドバーの
    並びや過去の例から推測しない
-2. **指示文はファイルに書く。** `/tmp/handoff-<topic>.md` のような絶対パスに全文を書き出す。
+2. **指示文はファイルに書く。** パスは毎回一意にする:
+
+       mktemp /tmp/handoff-<topic>-XXXXXX.md
+
+   トピック名だけで固定すると、同じ話題を扱う別セッションや、受信側が読む前の再投入で
+   衝突する。投げっぱなし運用では後の書き込みが先のファイルを黙って上書きし、受信ペインが
+   **別タスクの指示を読む**。
    **ペインへ複数行を直接送ってはならない。** herdr 0.7.4 の送信系は `pane run`
-   （本文 + Enter）・`pane send-text` / `pane send-keys` / `pane send-input`（低レベル）・
-   `agent send`（Enter なし）で、**どれもブラケットペーストを解釈しない**
-   （それを行う `agent prompt` は 0.7.4 に無い）。改行はそのまま送信になり、指示文が
-   1 行目で千切れる。使ってよいのは `pane run` に 1 行だけ
+   （本文 + Enter）・`pane send-text` / `pane send-keys`（低レベル）・`agent send`
+   （Enter なし）で、**どれもブラケットペーストを解釈しない**（それを行う `agent prompt`
+   は 0.7.4 に無い）。改行はそのまま送信になり、指示文が 1 行目で千切れる。使ってよいのは
+   `pane run` に 1 行だけ
 3. **投入前に確認を取る。** 宛先の `pane_id` と役割と `cwd`、指示文ファイルの絶対パス、
    実際に打つ herdr コマンドそのものを提示して GO をもらう。確認なしの投入は禁止
 4. **投げっぱなしにする。** GO の直後、**投入の直前にもう一度状態を確認する**:
@@ -117,10 +123,9 @@ initialPrompt: |
 D ペインへ投げるときは 1 行プロンプトを「読んで、**まず質問から始めてください**」にする。
 D は対話で詰める場であって、あなたが結論まで走らせる場ではない。
 
-ペインが無いときは自分で開く。**`herdr agent start` は使わない** — `--tab` を省略すると
-UI がフォーカスしているペイン（あなたのペインとは限らない）を割り、`--tab` を渡すと今度は
-空のルートペインを使わずもう 1 枚割る。どちらも実測で確認済み。代わりに同じ workspace へ
-タブを作り、そのルートペインで直接起動する 4 段を踏む:
+ペインが無いときは自分で開く。**`herdr agent start` は使わない** — `--tab` を渡しても空の
+ルートペインを使わず、もう 1 枚余分に割るため（実測で確認。空シェルのペインが残る）。
+代わりに同じ workspace へタブを作り、そのルートペインで直接起動する 4 段を踏む:
 
     # 1. タブを作る。root_pane の pane_id を .result.root_pane.pane_id から読む
     herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd <プロジェクトの絶対パス> \
@@ -136,6 +141,11 @@ UI がフォーカスしているペイン（あなたのペインとは限ら�
     # 4. 安定名を付ける
     herdr agent rename <root_pane_id> <name>
 
+段 1 と段 2 の間に待ちを置かないのは、シェルの初期化中に届いた入力を PTY のライン規律が
+保持するため。段 3 が `blocked` で返ったら投入しない — `-w` は新しい worktree
+ディレクトリを作るので、Claude Code のフォルダ信頼ダイアログで止まっている可能性がある。
+その場合は状態をユーザーに報告して指示を仰ぐ。
+
 `--workspace "$HERDR_WORKSPACE_ID"` は必須。**省略すると無関係な workspace にペインを
 作ることがある**（実測で別プロジェクトのタブに割り込んだ）。`--permission-mode auto` も
 必須で、権限モードを既定任せにしない（開いたペインが確認待ちで止まると、投げっぱなし運用が
@@ -147,10 +157,11 @@ UI がフォーカスしているペイン（あなたのペインとは限ら�
 毎回 `herdr agent list` から `pane_id` を読み直す。
 
 禁止（コマンド名ではなく性質で読むこと）: 確認なしの投入、`idle` / `done` 以外のペインへの
-投入、複数行の直接送信、**`pane run` 以外の送信系（`pane send-text` / `pane send-keys` /
-`pane send-input` / `agent send`）で他人のペインへ入力を送ること**、`agent attach --takeover`、
-自分が作っていないペイン・タブ・workspace の close（`pane close` / `tab close` /
-`workspace close`）、`herdr server stop`。
+投入、複数行の直接送信、**`pane run` 以外の手段で他人のペインへ入力・キーを送ること**
+（0.7.4 の CLI では `pane send-text` / `pane send-keys` / `agent send` が該当。ソケット API
+には `pane.send_input` もあるが CLI 動詞は無い）、`agent attach --takeover`、自分が作って
+いないペイン・タブ・workspace の close（`pane close` / `tab close` / `workspace close`）、
+`herdr server stop`。
 
 ## 共通ルール
 

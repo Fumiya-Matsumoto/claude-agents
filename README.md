@@ -155,7 +155,7 @@ codex exec review - \
 |---|---|---|
 | `cco` | `claude --permission-mode auto --agent orchestrator --effort max` | **O 管理**: 指示文発行・PR 検証・マージ・追跡専任。`orchestrator` の frontmatter により Opus で走る。effort はメインセッションで frontmatter が発火しないため、`--effort max` フラグで明示している。起動時に状況同期が自動で走る |
 | `ccd` | `claude --permission-mode auto --model fable --agent claude --effort high` | **D 決定**: 仕様策定・計画・敵対的検証。**規模を問わず計画はここ**。Fable をメインスレッドで使う唯一の入口。決定 1 件で使い捨て |
-| `ccw` | `claude --permission-mode auto -w` | **W 実装**: セッション専用 worktree で実装〜PR 作成。`ccw <name>` で worktree に名前も付けられる。`-w` は値を省略できる引数を取るため、必ず末尾に置く（先頭側に置くと後続の引数を worktree 名として食ってしまう） |
+| `ccw` | `claude --permission-mode auto -w` | **W 実装**: セッション専用 worktree で実装〜PR 作成。`ccw <name>` で worktree に名前も付けられる。`-w` は値を省略できる引数を取るため、必ず末尾に置く（`-w` より後ろに置いた引数だけが worktree 名として拾われる。フラグを `-w` より前に置かないと `ccw <name>` の `name` が worktree 名にならず、初回プロンプトとして送信されてしまう） |
 
 シングルペイン運用でも auto-router 単体で完結します（ペイン運用は任意）。
 
@@ -364,6 +364,11 @@ cd /path/to/claude-agents
 #    .permissions 自体も消す（インストール前が {"permissions":{}} のように
 #    defaultMode 以外のキーを 1 つも持たない状態だった環境でも同様で、この場合
 #    .permissions キー自体が消える）
+#    注意: CLAUDE_AGENTS_SET_DEFAULT_MODE=0 でインストールした環境では install.sh が
+#    permissions.defaultMode に一切触れていないため、この手順をそのまま実行すると
+#    インストール前からユーザー自身が置いていた defaultMode の設定まで消えてしまう。
+#    該当する場合は、下の jq 式のうち permissions.defaultMode を削除する節を外してから
+#    実行すること。
 #    全体を ( ) のサブシェルに入れてあるのは、作業用の変数を対話シェルに
 #    残さないため。失敗時はメッセージを出して settings.json を変更せずに抜ける
 (

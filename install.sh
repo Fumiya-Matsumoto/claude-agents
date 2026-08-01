@@ -235,7 +235,7 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     #     トリが自分自身に auto を付与できないようにするための制限）。
     # (3) settings の優先順位は user settings が最下位で、プロジェクト側の
     #     defaultMode に負けうる。そのためエイリアス側の --permission-mode
-    #     auto（CLI フラグ、最優先）と二重に張っている（「ペイン運用」を
+    #     auto（CLI フラグ、最優先）と二重に張っている（README の「ペイン運用」を
     #     参照）。ここは保険であり唯一の手段ではない。
     # 既に値があり "auto" と異なる場合は上書きし、元の値を明示する
     # （effortLevel と同じ作法）。
@@ -486,42 +486,63 @@ else
   ccd_line="$(grep -F 'alias ccd=' "$RC" 2>/dev/null | tail -n1 || true)"
   ccw_line="$(grep -F 'alias ccw=' "$RC" 2>/dev/null | tail -n1 || true)"
   alias_stale=''
-  case "$cco_line" in
-    *'--effort max'*) : ;;
-    *)
-      alias_stale=1
-      echo "⚠ ${RC} の cco エイリアスに --effort max がありません（古いブロックのままです）。"
-      echo '  --effort フラグは settings.json の effortLevel に勝つ唯一の手段なので、このままだと'
-      echo '  orchestrator の effort が意図どおり max になりません。'
-      ;;
-  esac
-  case "$cco_line" in
-    *'--permission-mode auto'*) : ;;
-    *)
-      alias_stale=1
-      echo "⚠ ${RC} の cco エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
-      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
-      echo '  残ります。'
-      ;;
-  esac
-  case "$ccd_line" in
-    *'--permission-mode auto'*) : ;;
-    *)
-      alias_stale=1
-      echo "⚠ ${RC} の ccd エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
-      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
-      echo '  残ります。'
-      ;;
-  esac
+
+  # cco / ccd / ccw の「このフラグを含むか」検査は、エイリアス名以外まったく
+  # 同じ形をしている（1 個欠けているごとに $alias_stale を立てて 1 行警告する。
+  # 置換用ブロックは呼び出し側で最後に 1 回だけ出す挙動は変えない）ので小関数へ
+  # 畳む。ccw の引数順検査は部分文字列の有無ではなく前後関係を見るため形が違い、
+  # 無理にこの関数へは押し込まず下で別扱いにする。
+  check_alias_flag() { # alias_name line needle description_line...
+    local name="$1" line="$2" needle="$3"
+    shift 3
+    case "$line" in
+      *"$needle"*) return 0 ;;
+    esac
+    alias_stale=1
+    echo "⚠ ${RC} の ${name} エイリアスに ${needle} がありません（古いブロックのままです）。"
+    while [ "$#" -gt 0 ]; do
+      echo "  $1"
+      shift
+    done
+  }
+
+  check_alias_flag cco "$cco_line" '--effort max' \
+    '--effort フラグは settings.json の effortLevel に勝つ唯一の手段なので、このままだと' \
+    'orchestrator の effort が意図どおり max になりません。'
+  check_alias_flag cco "$cco_line" '--permission-mode auto' \
+    'ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が' \
+    '残ります。'
+  check_alias_flag ccd "$ccd_line" '--permission-mode auto' \
+    'ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が' \
+    '残ります。'
+  # --agent claude が無いと、settings.json の "agent": "auto-router" が --model
+  # を渡しても効き続けるため、D ペインは「Fable の上に auto-router を着せた」
+  # セッションになる。すると Tier 3 ゲートが「停止して決定セッションを推奨せよ」
+  # と命じるのに自分がその決定セッションである、という自己矛盾が起きる
+  # （README の「ペイン運用」を参照）。
+  check_alias_flag ccd "$ccd_line" '--agent claude' \
+    '"agent": "auto-router" は --model を渡しても効き続けるため、これが無いと D ペインは' \
+    '「Fable の上に auto-router を着せた」セッションになり、Tier 3 ゲートが決定セッションを' \
+    '推奨するのに自分がその決定セッションである、という自己矛盾が起きます' \
+    '（README の「ペイン運用」を参照）。'
+
+  # ccw だけは単純な部分文字列検査ではなく、--permission-mode auto が -w より
+  # 前にあるかという順序まで見る。-w は worktree 名を省略できる引数なので、
+  # -w より後ろに置いた引数だけが worktree 名として拾われる。フラグを -w より
+  # 前に置かないと、ccw <name> の name は worktree 名にならず初回プロンプトと
+  # して送信されてしまう（README の「ペイン運用」を参照）。単純な有無検査
+  # （*'--permission-mode auto'*）だと、この壊れた順序を「現行」と誤判定する。
   case "$ccw_line" in
-    *'--permission-mode auto'*) : ;;
+    *'--permission-mode auto'*'-w'*) : ;;
     *)
       alias_stale=1
-      echo "⚠ ${RC} の ccw エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
-      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
-      echo '  残ります。'
+      echo "⚠ ${RC} の ccw エイリアスの引数順が古い、または --permission-mode auto がありません（古いブロックのままです）。"
+      echo '  -w は worktree 名を省略できる引数なので、-w より後ろに置いた引数だけが worktree 名になります。'
+      echo '  フラグを -w より前に置かないと、ccw <name> の name が worktree 名にならず初回プロンプトとして'
+      echo '  送信されてしまいます。'
       ;;
   esac
+
   if [ -n "$alias_stale" ]; then
     echo "  rc の自動書き換えはしないので、下記のブロックで ${MARKER} 〜 ${MARKER_END} を"
     echo '  手動で置き換えてください:'

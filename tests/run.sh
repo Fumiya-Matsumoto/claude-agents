@@ -174,7 +174,7 @@ run_case() { # id description function
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/claude-agents-tests.XXXXXX")"
   export HOME="${SANDBOX}/home"
   mkdir -p "$HOME"
-  unset CLAUDE_CONFIG_DIR CLAUDE_AGENTS_STRIP_MODEL
+  unset CLAUDE_CONFIG_DIR CLAUDE_AGENTS_STRIP_MODEL CLAUDE_AGENTS_SET_DEFAULT_MODE
   export PATH="$ORIG_PATH"
   export SHELL="/bin/bash"
   cd "$SANDBOX" || exit 99
@@ -258,6 +258,8 @@ run_case t41 "古いエイリアスブロックを警告する" case_t41_alias_o
 run_case t42 "現行のエイリアスブロックでは警告しない" case_t42_alias_current_block_quiet
 run_case t42b "permission-mode だけ欠けたブロックを出し分けて警告する" case_t42b_alias_missing_permission_mode_only
 run_case t42c "ccd / ccw だけが古いブロックを出し分けて警告する" case_t42c_alias_ccd_ccw_stale
+run_case t42d "ccw の旧い引数順を警告する" case_t42d_alias_ccw_wrong_order
+run_case t42e "ccd から --agent claude が抜けたブロックを警告する" case_t42e_alias_ccd_missing_agent_claude
 run_case t47 "permissions.defaultMode を設定しつつ兄弟キーを保つ" case_t47_default_mode_preserves_siblings
 run_case t50 "permissions が非オブジェクトのとき生エラーを出さず専用警告で継続する" case_t50_non_object_permissions_survives
 run_case t51 "CLAUDE_AGENTS_SET_DEFAULT_MODE=0 で defaultMode の書き込みをスキップする" case_t51_default_mode_opt_out
@@ -269,6 +271,7 @@ run_case t45 "jq 失敗時に隠しファイルを残さない" case_t45_readme_
 run_case t46 "CLAUDE_CONFIG_DIR 環境で symlink 削除まで追従する" case_t46_readme_uninstall_claude_config_dir
 run_case t48 "uninstall は permissions の兄弟キーを残す" case_t48_uninstall_preserves_permission_siblings
 run_case t49 "uninstall は空になった permissions を消す" case_t49_uninstall_drops_empty_permissions
+run_case t52 "インストール前から空の permissions がある場合も uninstall で消す" case_t52_uninstall_drops_preexisting_empty_permissions
 
 echo ""
 echo "pass ${PASS_COUNT} / fail ${FAIL_COUNT}"
