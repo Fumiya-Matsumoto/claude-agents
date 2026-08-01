@@ -29,6 +29,7 @@ case_t30_install_fresh() {
   assert_file_exists "t30 settings.json" "$s"
   assert_eq "t30 agent が設定される" "$(jq -r '.agent' "$s")" "auto-router"
   assert_eq "t30 effortLevel が設定される" "$(jq -r '.effortLevel' "$s")" "xhigh"
+  assert_eq "t30 permissions.defaultMode が設定される" "$(jq -r '.permissions.defaultMode' "$s")" "auto"
   assert_eq "t30 Stop フックが 1 件登録される" "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "1"
   assert_contains "t30 登録メッセージ" "$INSTALL_OUT" "Stop フックに claude-agents-strip-model.sh を登録"
   assert_contains "t30 エイリアス追加" "$INSTALL_OUT" "aliases:"
@@ -47,6 +48,20 @@ case_t31_install_idempotent() {
   assert_not_contains "t31 「登録」とは言わない" "$INSTALL_OUT" "Stop フックに claude-agents-strip-model.sh を登録"
   assert_contains "t31 エイリアスもスキップ表示" "$INSTALL_OUT" "aliases: 設定済み（スキップ）"
   assert_eq "t31 settings.json の内容が同じ" "$(cat "$s")" "$first"
+}
+
+# インストール前から permissions.allow 等の兄弟キーがある場合、
+# permissions.defaultMode の設定がそれらを消さないこと（jq のパス代入が
+# 兄弟キーを保つことの回帰検出。effortLevel と同じ「元の値を上書き」表示に
+# なることも合わせて確認する）
+case_t47_default_mode_preserves_siblings() {
+  local s="${HOME}/.claude/settings.json"
+  write_settings "$s" '{"permissions":{"allow":["Bash(ls:*)"],"defaultMode":"plan"}}'
+  run_install
+  assert_eq "t47 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t47 defaultMode が auto になる" "$(jq -r '.permissions.defaultMode' "$s")" "auto"
+  assert_eq "t47 allow は残る" "$(jq -c '.permissions.allow' "$s")" '["Bash(ls:*)"]'
+  assert_contains "t47 元の値を上書きした旨を表示する" "$INSTALL_OUT" '元の値 "plan" を上書き'
 }
 
 # ---------------------------------------------------------------- CLAUDE_CONFIG_DIR
@@ -382,15 +397,34 @@ EOF
 case_t42_alias_current_block_quiet() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
+alias cco='claude --agent orchestrator --effort max --permission-mode auto'
+alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'
+alias ccw='claude -w --permission-mode auto'
+# <<< claude-agents aliases <<<
+EOF
+  run_install
+  assert_eq "t42 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t42 スキップ表示" "$INSTALL_OUT" "aliases: 設定済み（スキップ）"
+  assert_not_contains "t42 警告は出ない（effort）" "$INSTALL_OUT" "--effort max がありません"
+  assert_not_contains "t42 警告は出ない（permission-mode）" "$INSTALL_OUT" "--permission-mode auto がありません"
+}
+
+# --effort max だけを備えた「一世代前」のブロック。effort の警告は出さず、
+# permission-mode の警告だけを出し分けられることを確かめる。両方欠けた t41 と
+# 合わせて、フラグごとに独立して判定していることの対照になる。
+case_t42b_alias_missing_permission_mode_only() {
+  cat > "${HOME}/.bashrc" <<'EOF'
+# >>> claude-agents aliases >>>
 alias cco='claude --agent orchestrator --effort max'
 alias ccd='claude --model fable --agent claude --effort high'
 alias ccw='claude -w'
 # <<< claude-agents aliases <<<
 EOF
   run_install
-  assert_eq "t42 終了ステータス" "$INSTALL_STATUS" "0"
-  assert_contains "t42 スキップ表示" "$INSTALL_OUT" "aliases: 設定済み（スキップ）"
-  assert_not_contains "t42 警告は出ない" "$INSTALL_OUT" "--effort max がありません"
+  assert_eq "t42b 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t42b permission-mode の欠落を警告する" "$INSTALL_OUT" "--permission-mode auto がありません"
+  assert_not_contains "t42b effort は警告しない" "$INSTALL_OUT" "--effort max がありません"
+  assert_contains "t42b 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccw='claude -w --permission-mode auto'"
 }
 
 # ---------------------------------------------------------------- README
@@ -435,6 +469,8 @@ case_t43_readme_uninstall_roundtrip() {
   assert_eq "t43 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
   assert_eq "t43 agent が消える" "$(jq -r 'has("agent")' "$s")" "false"
   assert_eq "t43 effortLevel が消える" "$(jq -r 'has("effortLevel")' "$s")" "false"
+  assert_eq "t43 permissions.defaultMode が消える" \
+    "$(jq -r '(.permissions // {}) | has("defaultMode")' "$s")" "false"
   assert_eq "t43 Stop 登録が消える" "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "0"
   assert_eq "t43 agents の symlink が消える" \
     "$(find "${HOME}/.claude/agents" -type l 2>/dev/null | wc -l | tr -d ' ')" "0"

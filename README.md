@@ -179,7 +179,7 @@ cd claude-agents
 2. `skills/*/` を `~/.claude/skills/` へ **symlink**（agents-feedback スキル等）
 3. `bin/*` を `~/.claude/bin/` へ **symlink**（系列外レビューの起動スクリプト `codex-review`）
 4. `hooks/*` を `~/.claude/hooks/` へ **symlink**（`settings.json` から `"model"` を剥がし、`"effortLevel"` を `"xhigh"` に正規化する `claude-agents-strip-model.sh`。理由は後述の「注意」を参照）
-5. `~/.claude/settings.json` に `"agent": "auto-router"` と `"effortLevel": "xhigh"` を設定（要 jq、バックアップ作成。`effortLevel` が既にあり値が異なる場合は上書きしたうえで元の値を表示する）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。以降は Stop フックが `"model"` を剥がし `"effortLevel"` を `"xhigh"` へ正規化し直すため、`/model` と `/effort` はどちらも**恒久化しなくなる**（`/effort` の切替がセッション限りか 1 ターン限りかは未確認。「注意」節を参照）。`"model"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する
+5. `~/.claude/settings.json` に `"agent": "auto-router"` と `"effortLevel": "xhigh"` を設定（要 jq、バックアップ作成。`effortLevel` が既にあり値が異なる場合は上書きしたうえで元の値を表示する）。加えて `Stop` フックへ `claude-agents-strip-model.sh` を追記登録する（既存の `Stop` / `SessionStart` エントリは保持したまま追記。コマンド文字列で既存判定するため再実行しても重複登録されない）。以降は Stop フックが `"model"` を剥がし `"effortLevel"` を `"xhigh"` へ正規化し直すため、`/model` と `/effort` はどちらも**恒久化しなくなる**（`/effort` の切替がセッション限りか 1 ターン限りかは未確認。「注意」節を参照）。`"model"` が残っていれば、次のターンでフックが自動的に消す旨と手動削除コマンドを表示する。同じ手順で `permissions.defaultMode` も `"auto"` に設定する（既存値が異なれば上書きしたうえで元の値を表示する）。`settings.json` は machine-local で配布されないためマシンごとに設定が要ること、`defaultMode: "auto"` は user settings（`~/.claude/settings.json`）でのみ有効でプロジェクト側の `.claude/settings.json` / `.claude/settings.local.json` に書かれた `auto` は Claude Code v2.1.142 以降無視されること、user settings は優先順位が最下位でプロジェクト側の `defaultMode` に負けうるためエイリアス側の `--permission-mode auto`（CLI フラグ、最優先）と二重に張っていること、の 3 点が理由（詳細は下記「6. ペイン起動エイリアス」）
 6. シェル rc に `cco` / `ccd` / `ccw` エイリアスを追加（マーカー付き・冪等）
 7. `codex` CLI の有無を検出して表示（未導入でも中断しません。系列外レビューがスキップされるだけです）
 
@@ -347,16 +347,20 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 #    「成功したように見える」
 cd /path/to/claude-agents
 
-# 1. settings.json から "agent" キー・"effortLevel" キーと Stop フックの登録
-#    エントリを削除（symlink を先に消すと、切れた symlink をフックが毎ターン
-#    叩く状態が残るため必ず先に実行する）
+# 1. settings.json から "agent" キー・"effortLevel" キー・"permissions.defaultMode"
+#    キーと Stop フックの登録エントリを削除（symlink を先に消すと、切れた
+#    symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
 #    settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らず
 #    リンク自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに
 #    一時ファイルを作って書き戻す
-#    注意: del(.agent, .effortLevel) はハーネスの既定値に戻すだけであり、
-#    インストール前にユーザーが settings.json に置いていた元の値には戻らない。
-#    元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
-#    に残っているので、必要ならそこから手動で復元すること
+#    注意: del(.agent, .effortLevel) および permissions.defaultMode の削除は
+#    ハーネスの既定値に戻すだけであり、インストール前にユーザーが settings.json
+#    に置いていた元の値には戻らない。元の値は install.sh が作成した
+#    ~/.claude/settings.json.bak.<タイムスタンプ> に残っているので、必要なら
+#    そこから手動で復元すること。permissions.defaultMode は .permissions から
+#    その 1 キーだけを消し、ユーザーが元から持っていた .permissions.allow 等の
+#    兄弟キーは残す。削除の結果 .permissions が空オブジェクトになった場合のみ
+#    .permissions 自体も消す
 #    全体を ( ) のサブシェルに入れてあるのは、作業用の変数を対話シェルに
 #    残さないため。失敗時はメッセージを出して settings.json を変更せずに抜ける
 (
@@ -377,7 +381,12 @@ cd /path/to/claude-agents
   real="$dir/$(basename "$target")"
   [ -f "$real" ] || { echo "settings.json の実体が見つかりません: $real" >&2; exit 1; }
   tmp="$(mktemp "$dir/.settings.json.uninstall.XXXXXX")" || exit 1
-  if jq 'del(.agent, .effortLevel) | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))' \
+  if jq 'del(.agent, .effortLevel)
+      | .hooks.Stop |= ((. // []) | map(select(((.hooks // []) | any(.command // "" | contains("claude-agents-strip-model.sh"))) | not)))
+      | if (.permissions? | type) == "object" then
+          (.permissions |= del(.defaultMode))
+          | if (.permissions | length) == 0 then del(.permissions) else . end
+        else . end' \
       "$real" > "$tmp"; then
     mv "$tmp" "$real"
   else

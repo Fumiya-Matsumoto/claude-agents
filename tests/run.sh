@@ -256,6 +256,8 @@ run_case t39 "壊れた symlink でも警告して続行する" case_t39_install
 run_case t40 "実体ディレクトリが読み取り専用でも部分適用で死なない" case_t40_install_readonly_settings_dir
 run_case t41 "古いエイリアスブロックを警告する" case_t41_alias_old_block_warns
 run_case t42 "現行のエイリアスブロックでは警告しない" case_t42_alias_current_block_quiet
+run_case t42b "permission-mode だけ欠けたブロックを出し分けて警告する" case_t42b_alias_missing_permission_mode_only
+run_case t47 "permissions.defaultMode を設定しつつ兄弟キーを保つ" case_t47_default_mode_preserves_siblings
 
 echo "README（アンインストール手順）"
 run_case t43 "install → uninstall のラウンドトリップ" case_t43_readme_uninstall_roundtrip

@@ -224,6 +224,43 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
       echo '⚠ settings.json への "effortLevel" 設定に失敗しました（jq エラー）。手動で追加してください。'
     fi
 
+    # permissions.defaultMode を "auto" に設定する。理由は 3 つ:
+    # (1) settings.json は machine-local でこのリポジトリから配布されないため、
+    #     新しいマシンでは auto mode が既定にならず、ペインを開くたびに
+    #     shift+tab で入れ直す手間が残る。install.sh は各マシンで必ず実行
+    #     されるので、ここで能動的に設定する。
+    # (2) defaultMode: "auto" は user settings（~/.claude/settings.json）でのみ
+    #     有効。Claude Code v2.1.142 以降、プロジェクト側の .claude/settings.json
+    #     / .claude/settings.local.json に書かれた "auto" は無視される（リポジ
+    #     トリが自分自身に auto を付与できないようにするための制限）。
+    # (3) settings の優先順位は user settings が最下位で、プロジェクト側の
+    #     defaultMode に負けうる。そのためエイリアス側の --permission-mode
+    #     auto（CLI フラグ、最優先）と二重に張っている（「6. ペイン起動
+    #     エイリアス」を参照）。ここは保険であり唯一の手段ではない。
+    # 既に値があり "auto" と異なる場合は上書きし、元の値を明示する
+    # （effortLevel と同じ作法）。.permissions がオブジェクトでない・存在
+    # しない場合でも jq がエラーにならないよう、type チェックで安全に拾う。
+    prev_default_mode="$(jq -r '
+      if (.permissions | type) == "object" and (.permissions | has("defaultMode"))
+      then (.permissions.defaultMode | tojson)
+      else empty end
+    ' "$SETTINGS" 2>/dev/null || true)"
+    tmp="$(mktemp_settings "$SETTINGS_DIR")"
+    if [ -z "$tmp" ]; then
+      echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。"permissions.defaultMode" の設定をスキップします。手動で追加してください。'
+    elif jq '.permissions.defaultMode = "auto"' "$SETTINGS" > "$tmp"; then
+      preserve_mode "$SETTINGS" "$tmp"
+      mv "$tmp" "$SETTINGS"
+      if [ -n "$prev_default_mode" ] && [ "$prev_default_mode" != '"auto"' ]; then
+        echo "settings.json: \"permissions.defaultMode\": \"auto\" を設定（元の値 ${prev_default_mode} を上書き）"
+      else
+        echo 'settings.json: "permissions.defaultMode": "auto" を設定'
+      fi
+    else
+      rm -f "$tmp"
+      echo '⚠ settings.json への "permissions.defaultMode" 設定に失敗しました（jq エラー）。手動で追加してください。'
+    fi
+
     # Stop フックへ claude-agents-strip-model.sh を追記登録する。既存の Stop
     # エントリ（例: notify-stop.sh）や SessionStart フックは絶対に壊さない。
     # コマンド文字列に claude-agents-strip-model.sh を含むかどうかで既存判定
@@ -383,9 +420,9 @@ if ! grep -qF "$MARKER" "$RC" 2>/dev/null; then
   cat >> "$RC" << EOF
 
 $MARKER
-alias cco='claude --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
-alias ccd='claude --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）
-alias ccw='claude -w'                                                # Worker ペイン（worktree 自動作成）
+alias cco='claude --agent orchestrator --effort max --permission-mode auto'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
+alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'        # Decision ペイン（素の Fable で意思決定）
+alias ccw='claude -w --permission-mode auto'                                                # Worker ペイン（worktree 自動作成）
 $MARKER_END
 EOF
   echo "aliases: ${RC} に追加しました（source ${RC} で有効化）"
@@ -406,22 +443,39 @@ else
   # 拾えない偽陰性も同様に実機で再現している。
   # ブロック内・ブロック外のどちらにも `alias cco=` が 1 つも無い場合も
   # 「古い」として扱う（下の case のデフォルト分岐が拾う）。
+  # 陳腐化の判定軸はフラグごとに独立している。欠けているフラグごとに 1 行ずつ
+  # 警告を出し、どれが欠けているかを行単位で読めるようにする（連結して 1 行に
+  # まとめると、片方だけ欠けた rc と両方欠けた rc を文面で区別できなくなる）。
   cco_line="$(grep -F 'alias cco=' "$RC" 2>/dev/null | tail -n1 || true)"
+  alias_stale=''
   case "$cco_line" in
     *'--effort max'*) : ;;
     *)
+      alias_stale=1
       echo "⚠ ${RC} の cco エイリアスに --effort max がありません（古いブロックのままです）。"
-      echo '  --effort フラグは settings.json の effortLevel に勝つため、このままだと orchestrator の'
-      echo '  effort が意図どおり max になりません。rc の自動書き換えはしないので、下記のブロックで'
-      echo "  ${MARKER} 〜 ${MARKER_END} を手動で置き換えてください:"
-      echo ''
-      echo "  $MARKER"
-      echo "  alias cco='claude --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
-      echo "  alias ccd='claude --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）"
-      echo "  alias ccw='claude -w'                                                # Worker ペイン（worktree 自動作成）"
-      echo "  $MARKER_END"
+      echo '  --effort フラグは settings.json の effortLevel に勝つ唯一の手段なので、このままだと'
+      echo '  orchestrator の effort が意図どおり max になりません。'
       ;;
   esac
+  case "$cco_line" in
+    *'--permission-mode auto'*) : ;;
+    *)
+      alias_stale=1
+      echo "⚠ ${RC} の cco エイリアスに --permission-mode auto がありません（古いブロックのままです）。"
+      echo '  ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が'
+      echo '  残ります。'
+      ;;
+  esac
+  if [ -n "$alias_stale" ]; then
+    echo "  rc の自動書き換えはしないので、下記のブロックで ${MARKER} 〜 ${MARKER_END} を"
+    echo '  手動で置き換えてください:'
+    echo ''
+    echo "  $MARKER"
+    echo "  alias cco='claude --agent orchestrator --effort max --permission-mode auto'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
+    echo "  alias ccd='claude --model fable --agent claude --effort high --permission-mode auto'        # Decision ペイン（素の Fable で意思決定）"
+    echo "  alias ccw='claude -w --permission-mode auto'                                                # Worker ペイン（worktree 自動作成）"
+    echo "  $MARKER_END"
+  fi
 fi
 
 # 7. 系列外レビュー（任意）の前提を検出。未導入でも中断しない
