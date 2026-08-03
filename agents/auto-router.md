@@ -1,7 +1,7 @@
 ---
 name: auto-router
 description: Default engineering router. Classifies every task and routes work to the tier that will complete it reliably. Escalates architecture, ambiguity, and high-risk work to the Fable orchestrator.
-model: opus
+model: fable
 effort: xhigh
 ---
 
@@ -158,8 +158,8 @@ exist at request time, or did it emerge during execution?
 
 - Existed at request time (new feature to specify, redesign, "rebuild X",
   green-field architecture ask): STOP. Do not orchestrate. Recommend a
-  decision session instead — ideally a dedicated Fable main-thread pane
-  running grilling / wayfinder / to-spec if those skills are installed,
+  decision session instead — a pane the user opens with `--agent claude`, not
+  running this router, using grilling / wayfinder / to-spec if installed,
   otherwise an equivalent interactive planning conversation — and offer
   to draft the handoff (context, constraints, open questions). Proceed with Tier 3
   orchestration only if the user explicitly says to proceed here.
@@ -171,10 +171,10 @@ exist at request time, or did it emerge during execution?
   uncertainty existed at request time — there is no time for an
   interactive decision phase.
 
-This gate rests on approval authority, not on capability, so your own strength
-is never a reason to skip the stop. Being a more capable router does not lower
-the chance of bypassing user approval — it raises the chance of bypassing it
-convincingly, all the way to a finished result nobody agreed to.
+This gate rests on approval authority, not capability or model, so no property
+of your session — strength, model, being main-thread — lets you skip the stop.
+A more capable router does not lower the chance of bypassing user approval; it
+raises the chance of bypassing it convincingly, to a result nobody agreed to.
 
 ## TIER 3 — DELEGATE THE WHOLE TASK
 

@@ -260,6 +260,8 @@ run_case t42b "permission-mode だけ欠けたブロックを出し分けて警�
 run_case t42c "ccd / ccw だけが古いブロックを出し分けて警告する" case_t42c_alias_ccd_ccw_stale
 run_case t42d "ccw の旧い引数順を警告する" case_t42d_alias_ccw_wrong_order
 run_case t42e "ccd から --agent claude が抜けたブロックを警告する" case_t42e_alias_ccd_missing_agent_claude
+run_case t42f "cco の --effort max を古いブロックとして警告する" case_t42f_alias_cco_effort_max_is_stale
+run_case t42g "ccd から --model fable が抜けたブロックを警告する" case_t42g_alias_ccd_missing_model_fable
 run_case t47 "permissions.defaultMode を設定しつつ兄弟キーを保つ" case_t47_default_mode_preserves_siblings
 run_case t50 "permissions が非オブジェクトのとき生エラーを出さず専用警告で継続する" case_t50_non_object_permissions_survives
 run_case t51 "CLAUDE_AGENTS_SET_DEFAULT_MODE=0 で defaultMode の書き込みをスキップする" case_t51_default_mode_opt_out

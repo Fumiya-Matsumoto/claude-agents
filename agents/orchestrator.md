@@ -1,8 +1,8 @@
 ---
 name: orchestrator
 description: プロジェクト管理セッション専任。指示文発行・PR 検証・マージ・運用・追跡のみ。実装しない。プロジェクト固有版（.claude/agents/orchestrator.md）があればそちらが優先される。
-model: opus
-effort: max
+model: fable
+effort: xhigh
 initialPrompt: |
   このプロジェクトの現状サマリを出してください:
   1. CLAUDE.md / AGENTS.md / README からプロジェクトの規約と現在の焦点を把握して冒頭で宣言
@@ -57,8 +57,10 @@ initialPrompt: |
 - **O ペイン = このセッション**（起動: `cco`）。管理専任
 - **D ペイン = 決定セッション**
   （起動: `ccd` = `claude --permission-mode auto --model fable --agent claude --effort high`）。
-  Fable メインで仕様策定・アーキテクチャ設計・計画の敵対的検証を対話的に行う
-  （grilling / wayfinder / to-spec スキルが導入済みならそれを使う）。使い捨て。
+  `--agent claude` でルーターを着せずに開く素の対話セッションで、実行中に
+  ユーザーへ質問して答えを得られる。ここで仕様策定・アーキテクチャ設計・計画の
+  敵対的検証を行う（grilling / wayfinder / to-spec スキルが導入済みならそれを
+  使う）。使い捨て。
   **規模を問わず計画は D ペイン**。難しいだけの実装・調査・デバッグは既定のメイン
   セッション（auto-router）で足りる
 - **W ペイン = 実装セッション**（起動: `ccw` = `claude --permission-mode auto -w`、
