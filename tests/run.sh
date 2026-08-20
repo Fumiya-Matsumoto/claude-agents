@@ -174,7 +174,8 @@ run_case() { # id description function
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/claude-agents-tests.XXXXXX")"
   export HOME="${SANDBOX}/home"
   mkdir -p "$HOME"
-  unset CLAUDE_CONFIG_DIR CLAUDE_AGENTS_STRIP_MODEL CLAUDE_AGENTS_SET_DEFAULT_MODE
+  unset CLAUDE_CONFIG_DIR CLAUDE_AGENTS_STRIP_MODEL CLAUDE_AGENTS_SET_DEFAULT_MODE \
+    CLAUDE_CODE_SESSION_ID
   export PATH="$ORIG_PATH"
   export SHELL="/bin/bash"
   cd "$SANDBOX" || exit 99
@@ -204,6 +205,8 @@ FILTER="${*:-}"
 . "${REPO_DIR}/tests/cases-hook.sh"
 # shellcheck source=tests/cases-install.sh
 . "${REPO_DIR}/tests/cases-install.sh"
+# shellcheck source=tests/cases-codex-review.sh
+. "${REPO_DIR}/tests/cases-codex-review.sh"
 
 echo "hooks/claude-agents-strip-model.sh"
 run_case t01 "1 回で正規化し、2 回目は書き込まない" case_t01_converge
@@ -272,6 +275,15 @@ run_case t46 "CLAUDE_CONFIG_DIR 環境で symlink 削除まで追従する" case
 run_case t48 "uninstall は permissions の兄弟キーを残す" case_t48_uninstall_preserves_permission_siblings
 run_case t49 "uninstall は空になった permissions を消す" case_t49_uninstall_drops_empty_permissions
 run_case t52 "インストール前から空の permissions がある場合も uninstall で消す" case_t52_uninstall_drops_preexisting_empty_permissions
+
+echo "bin/codex-review"
+run_case t60 "セッションマーカーが在れば 125 で降り、codex を起動しない" case_t60_session_marker_blocks
+run_case t61 "preflight が枠切れを検出したら 126 で降り、codex を起動しない" case_t61_quota_guard_blocks
+run_case t62a "codex-ratelimits が失敗しても素通りする" case_t62a_ratelimits_failure_passes_through
+run_case t62b "codex-ratelimits が壊れた JSON を返しても素通りする" case_t62b_ratelimits_malformed_json_passes_through
+run_case t62c "codex-ratelimits が隣に無くても素通りする" case_t62c_ratelimits_helper_missing_passes_through
+run_case t63 "マーカーは成立時のみ作られ、同一セッションの再実行は 125" case_t63_marker_created_only_on_success
+run_case t63b "codex が失敗したときはマーカーを作らない" case_t63b_marker_not_created_on_failure
 
 echo ""
 echo "pass ${PASS_COUNT} / fail ${FAIL_COUNT}"

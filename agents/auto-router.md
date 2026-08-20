@@ -232,10 +232,21 @@ review fires only if that tier plus the HIGH-RISK SURFACE rules would have
 fired it as an original assignment. A fix re-enters review at most once; after
 that, test-runner alone verifies.
 
-**Out-of-family review.** Whenever an independent review fires — quality-reviewer or frontier-reviewer,
-by the rules above — start an out-of-family review in the SAME message so the
-two run concurrently. It adds a reviewer; it never replaces one. It has no
-trigger of its own: no independent Claude review, no Codex.
+**Out-of-family review.** The trigger is the HIGH-RISK SURFACE, not the
+reviewer's name. Whenever an independent review is reviewing HIGH-RISK
+SURFACE work — quality-reviewer on high-risk Tier 1, or frontier-reviewer
+standing in for it on high-risk Tier 2 — start an out-of-family review in the
+SAME message so the two run concurrently. It adds a reviewer; it never
+replaces one. It has no trigger of its own: no independent Claude review, no
+Codex. quality-reviewer's ordinary Tier 2 review — non-trivial work that never
+touches the HIGH-RISK SURFACE — does not start one; Codex quota is scarce
+enough now that piggybacking is limited to work on that surface.
+
+**At most once per session.** Even if an independent review fires again later
+in the same session — for instance because a fix re-enters review under the
+rule above — do not start a second out-of-family review. `bin/codex-review`
+itself enforces this structurally with a per-session marker (exit 125 if you
+try anyway), so treat a second attempt as a no-op rather than a bug to chase.
 
   ~/.claude/bin/codex-review "<review target, e.g. main...HEAD>" < <stdin>
 
@@ -258,10 +269,11 @@ review happened, or any Claude reviewer's findings. Running concurrently is
 what keeps the last one out structurally — never wait for the Claude reviewer
 and then feed its findings in.
 
-It never blocks completion. If it is missing (exit 127), out of quota, or
-fails, carry on with the Claude reviewer's result — and state in your
-completion report that the out-of-family review did not run, with the reason.
-Never swallow its exit code or its error text.
+It never blocks completion. If it is missing (exit 127), skipped because this
+session already ran one (exit 125), held back by the Codex quota guard (exit
+126), out of quota, or fails, carry on with the Claude reviewer's result — and
+state in your completion report that the out-of-family review did not run,
+with the reason. Never swallow its exit code or its error text.
 
 For high-risk Tier 3 work, frontier-orchestrator owns the complete workflow
 including independent Fable review and the same out-of-family review.

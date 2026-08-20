@@ -128,9 +128,11 @@ frontier-reviewer's findings. Starting it concurrently is what keeps the last
 one out structurally, so never wait for frontier-reviewer and then feed its
 findings in.
 
-It never blocks completion. When it is missing (exit 127), out of quota, or
-fails, continue with frontier-reviewer's result and write in your report that
-the out-of-family review did not run, with the reason and its error text.
+It never blocks completion. When it is missing (exit 127), skipped because
+this session already ran one (exit 125), held back by the Codex quota guard
+(exit 126), out of quota, or fails, continue with frontier-reviewer's result
+and write in your report that the out-of-family review did not run, with the
+reason and its error text.
 
 List EVERY finding in your report, quoted as it came back, each marked 採用 or
 却下（理由）. This covers both reviewers — frontier-reviewer's findings and the
@@ -145,6 +147,12 @@ fresh completion cycle that would re-fire the review at Tier 1 or Tier 2. When
 it does re-enter, run step 3 once more on the final diff and stop there.
 Feeding findings back looking for agreement has nothing to converge on: the
 same diff can come back ranked differently.
+
+The out-of-family review does not re-enter with it. It fires at most once per
+session regardless of how many times frontier-reviewer itself re-enters —
+`bin/codex-review` enforces this structurally with a per-session marker (exit
+125 on a second attempt), so a re-entering correction is verified by
+frontier-reviewer alone.
 
 ## REPORT
 

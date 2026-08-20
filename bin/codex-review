@@ -16,14 +16,24 @@
 #             <再現手順 / 失敗しているテストの生出力 / エラーログ。無ければ「なし」>
 #
 #   出力    レビュー結果を stdout へ。失敗時は理由を stderr へ（握りつぶさない）。
-#   終了    0=走った（指摘の有無は伝えない。本文を読むこと） / 1=preflight 失敗 /
-#           2=引数エラー / 127=codex CLI 未導入（走っていない）
+#   終了    0=走った（指摘の有無は伝えない。本文を読むこと） /
+#           1=preflight 失敗（結果を取得できなかった） / 2=引数エラー /
+#           125=このセッションでは既に走った（走っていない） /
+#           126=枠ガードで見送った（走っていない） /
+#           127=codex CLI 未導入（走っていない）
 #
 # 固定値の意味（すべて実測で確定。詳細は README「系列外レビュー（Codex）」節）:
 #   --ignore-user-config  skills / memories / AGENTS.md / machine-local な model・effort を断つ
 #   --ephemeral           セッションを残さない
 #   --disable apps        MCP の裏口を閉じる。これが「Claude 由来の文脈を伏せる」ことの担保
 #   -m / model_reasoning_effort  既定は CLI 版ごとに動きうるので必ず明示する。陳腐化する前提の 2 値
+#
+# セッション 1 回上限 / 枠ガード（詳細は README「系列外レビュー（Codex）」節）:
+#   1 セッションにつき最大 1 回。CLAUDE_CONFIG_DIR/cache/codex-review-fired/
+#   にセッション ID ごとのマーカーを置いて判定する（構造で担保。プロンプト
+#   規律ではない）。加えて Codex の週次枠が 70% 以上使用済み、または
+#   レート制限が発生中のときはレビューを起動しない。閾値 70 はここに固定値
+#   として置く（設定キー・環境変数での外部化はしない）。
 #
 set -uo pipefail
 
@@ -44,6 +54,46 @@ postflight_ratelimits() {
   return 0
 }
 
+# preflight: 枠ガード。bin/codex-ratelimits の `ratelimits` サブコマンド
+# （5 秒 timeout 込み）に乗って rateLimitReachedType と primary.usedPercent を
+# 読む。閾値超過なら 1 を返す（呼び出し側が exit 126 で降りる）。
+#
+# 無ければ壊れる依存にしない: python3 が無い・ヘルパが見つからない・
+# 取得に失敗する・応答が壊れた JSON である、いずれの場合も何も言わずに
+# 0 を返して素通りする（postflight_ratelimits と同じ設計思想）。ブロックする
+# ときにだけ、判定に使った枠の状態を stderr 用のメッセージとして返す。
+preflight_quota_guard() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local self_dir helper json msg rc
+  self_dir="$(dirname -- "$0")"
+  helper="${self_dir}/codex-ratelimits"
+  [ -f "$helper" ] || return 0
+  json="$(python3 "$helper" ratelimits 2>/dev/null)" || return 0
+  [ -n "$json" ] || return 0
+
+  msg="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin) or {}
+    rl = data.get("account/rateLimits/read") or {}
+    reached = rl.get("rateLimitReachedType")
+    used = (rl.get("primary") or {}).get("usedPercent")
+    blocked = reached is not None or (isinstance(used, (int, float)) and used >= 70)
+except Exception:
+    sys.exit(0)
+if not blocked:
+    sys.exit(0)
+print("rateLimitReachedType=%r primary.usedPercent=%r" % (reached, used))
+sys.exit(1)
+' 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -eq 1 ] && [ -n "$msg" ]; then
+    echo "codex-review: SKIPPED — 枠ガードで見送りました（系列外レビューは走っていません）: ${msg}" >&2
+    return 1
+  fi
+  return 0
+}
+
 if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
   echo "usage: codex-review \"<review target>\" < <acceptance criteria and observed facts>" >&2
   exit 2
@@ -60,6 +110,32 @@ VARIABLE="$(cat)"
 if [ -z "${VARIABLE//[[:space:]]/}" ]; then
   echo "codex-review: 受け入れ基準と観測されている事実を stdin から渡してください（要約禁止）" >&2
   exit 2
+fi
+
+# ---- セッション 1 回上限（構造で担保）--------------------------------------
+# CLAUDE_CODE_SESSION_ID が空・未設定なら構造で担保できないので判定しない
+# （B3）。ローカルなファイル 1 個の確認なので枠ガードより先に置く（B5）。
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+MARKER_DIR="${CONFIG_DIR}/cache/codex-review-fired"
+MARKER="${MARKER_DIR}/${SESSION_ID}"
+
+if [ -n "$SESSION_ID" ]; then
+  # 起動時の掃除: 14 日より古いマーカーを消す。失敗は無視する
+  # （掃除はレビューの成立条件ではない）。
+  if [ -d "$MARKER_DIR" ]; then
+    find "$MARKER_DIR" -type f -mtime +14 -exec rm -f {} + >/dev/null 2>&1 || true
+  fi
+
+  if [ -e "$MARKER" ]; then
+    echo "codex-review: SKIPPED — このセッションでは既に系列外レビューが走りました（走っていません）" >&2
+    exit 125
+  fi
+fi
+
+# ---- 枠ガード（preflight）---------------------------------------------------
+if ! preflight_quota_guard; then
+  exit 126
 fi
 
 OUT="$(mktemp -t codex-review.XXXXXX)"
@@ -102,6 +178,11 @@ if [ "$status" -ne 0 ]; then
 fi
 
 if [ -s "$OUT" ]; then
+  # マーカーはレビューが成立したとき（ここ）だけ作る。preflight で見送った・
+  # 失敗した・出力が空だった場合は作らない＝上限を消費させない（B2）。
+  if [ -n "$SESSION_ID" ]; then
+    { mkdir -p "$MARKER_DIR" && : > "$MARKER"; } 2>/dev/null || true
+  fi
   cat "$OUT"
 else
   echo "codex-review: 出力が空です（exit 0 だが結果を取得できませんでした）" >&2
