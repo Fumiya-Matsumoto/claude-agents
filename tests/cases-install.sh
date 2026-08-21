@@ -57,6 +57,13 @@ case_t31_install_idempotent() {
   assert_contains "t31 登録済みは出し分ける" "$INSTALL_OUT" "Stop フックは登録済み（スキップ）"
   assert_not_contains "t31 「登録」とは言わない" "$INSTALL_OUT" "Stop フックに claude-agents-strip-model.sh を登録"
   assert_contains "t31 エイリアスもスキップ表示" "$INSTALL_OUT" "aliases: 設定済み（スキップ）"
+  # 1 回目が heredoc で書いた正本ブロックを、2 回目が check_alias_flag で読む。
+  # writer と checker が出会う唯一の場所なので、ここで「自分が書いたブロックを
+  # 自分で古いと言わない」ことを固定する。t41〜t42f は全ケースが自前で rc を
+  # 書いてから走るので heredoc 分岐に到達せず、正本ブロック側の値を守れない。
+  # 値をハードコードしない自己整合検査にしてあるのは、次に意図する effort や
+  # フラグが変わってもこの assertion を編集せずに効かせ続けるため。
+  assert_no_alias_warning "t31 正本ブロックは自分自身を古いと言わない" "$INSTALL_OUT"
   assert_eq "t31 settings.json の内容が同じ" "$(cat "$s")" "$first"
 }
 
@@ -430,6 +437,26 @@ case_t40_install_readonly_settings_dir() {
 
 # ---------------------------------------------------------------- エイリアス
 
+# エイリアス警告が 1 本も出ていないことを検証する。
+#
+# フラグの値そのもの（"--effort max がありません" など）を needle にした
+# assert_not_contains は、意図した値が変わった瞬間に空振りする。警告は出ている
+# のに文字列が一致しないだけで緑になり、退行を隠す。2026-08 に cco の
+# --effort max を --effort xhigh へ変えたとき、この形の assertion が実際に
+# 「警告が出ているのに通る」状態になった。
+#
+# したがって「警告が無いこと」を確かめる側は、値ではなく警告テンプレートの
+# 不変部分だけを見る。check_alias_flag の出力は必ず
+#   ⚠ <rc> の <name> エイリアスに <flag> がありません（古いブロックのままです）。
+# の形をとり、警告が 1 本でも立てば末尾に置換案内が出る。この 2 つはフラグの
+# 値が変わっても動かない。
+assert_no_alias_warning() { # label out
+  assert_not_contains "$1（cco の警告なし）" "$2" "cco エイリアスに"
+  assert_not_contains "$1（ccd の警告なし）" "$2" "ccd エイリアスに"
+  assert_not_contains "$1（ccw の警告なし）" "$2" "ccw エイリアスの"
+  assert_not_contains "$1（置換案内なし）" "$2" "手動で置き換えてください"
+}
+
 case_t41_alias_old_block_warns() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
@@ -440,14 +467,14 @@ alias ccw='claude -w'
 EOF
   run_install
   assert_eq "t41 終了ステータス" "$INSTALL_STATUS" "0"
-  assert_contains "t41 古いブロックを警告する" "$INSTALL_OUT" "--effort max がありません"
+  assert_contains "t41 古いブロックを警告する" "$INSTALL_OUT" "--effort xhigh がありません"
   assert_contains "t41 permission-mode の欠落も警告する" "$INSTALL_OUT" "--permission-mode auto がありません"
 }
 
 case_t42_alias_current_block_quiet() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'
 alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'
 alias ccw='claude --permission-mode auto -w'
 # <<< claude-agents aliases <<<
@@ -455,17 +482,20 @@ EOF
   run_install
   assert_eq "t42 終了ステータス" "$INSTALL_STATUS" "0"
   assert_contains "t42 スキップ表示" "$INSTALL_OUT" "aliases: 設定済み（スキップ）"
-  assert_not_contains "t42 警告は出ない（effort）" "$INSTALL_OUT" "--effort max がありません"
-  assert_not_contains "t42 警告は出ない（permission-mode）" "$INSTALL_OUT" "--permission-mode auto がありません"
+  assert_no_alias_warning "t42 警告は 1 本も出ない" "$INSTALL_OUT"
 }
 
-# --effort max だけを備えた「一世代前」のブロック。effort の警告は出さず、
-# permission-mode の警告だけを出し分けられることを確かめる。両方欠けた t41 と
-# 合わせて、フラグごとに独立して判定していることの対照になる。
+# 意図した effort（--effort xhigh）は持つが --permission-mode auto を欠くブロック。
+# effort の警告は出さず、permission-mode の警告だけを出し分けられることを確かめる。
+# 両方欠けた t41 と合わせて、フラグごとに独立して判定していることの対照になる。
+# 「--effort max なら警告しない」を固定していた版から fixture を差し替えてある。
+# max は 2026-08 まで意図した値だっただけで、恒久的に許される値ではない
+# （その入力は t42f が扱う）。effort の否定側の needle を "cco エイリアスに
+# --effort" と値抜きで書いてあるのは、値が変わっても空振りさせないため。
 case_t42b_alias_missing_permission_mode_only() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --agent orchestrator --effort max'
+alias cco='claude --agent orchestrator --effort xhigh'
 alias ccd='claude --model fable --agent claude --effort high'
 alias ccw='claude -w'
 # <<< claude-agents aliases <<<
@@ -473,35 +503,35 @@ EOF
   run_install
   assert_eq "t42b 終了ステータス" "$INSTALL_STATUS" "0"
   assert_contains "t42b permission-mode の欠落を警告する" "$INSTALL_OUT" "--permission-mode auto がありません"
-  assert_not_contains "t42b effort は警告しない" "$INSTALL_OUT" "--effort max がありません"
+  assert_not_contains "t42b effort は警告しない" "$INSTALL_OUT" "cco エイリアスに --effort"
   # 正本ブロックと警告時の置換用ブロックのドリフト検出（cco / ccd / ccw の
   # 3 行とも、置換用の案内が正本と文字列一致していることを固定する）
-  assert_contains "t42b 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort max'"
+  assert_contains "t42b 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'"
   assert_contains "t42b 置換用ブロックを提示する（ccd）" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
   assert_contains "t42b 置換用ブロックを提示する（ccw）" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
 }
 
-# --effort max だけを既に持つ cco と異なり、ccd / ccw の 2 行だけが古い
-# （--permission-mode auto を含まない）ブロック。cco は警告せず、ccd / ccw
-# だけを行単位で出し分けられることを確かめる（受入条件 B）。
+# cco だけが現行で、ccd / ccw の 2 行だけが古い（--permission-mode auto を
+# 含まない）ブロック。cco は警告せず、ccd / ccw だけを行単位で出し分けられる
+# ことを確かめる（受入条件 B）。cco 行はフラグの順序も正本と変えてあり、判定が
+# 順序ではなく有無で行われることを兼ねて固定している。
 case_t42c_alias_ccd_ccw_stale() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --agent orchestrator --effort max --permission-mode auto'
+alias cco='claude --agent orchestrator --effort xhigh --permission-mode auto'
 alias ccd='claude --model fable --agent claude --effort high'
 alias ccw='claude -w'
 # <<< claude-agents aliases <<<
 EOF
   run_install
   assert_eq "t42c 終了ステータス" "$INSTALL_STATUS" "0"
-  assert_not_contains "t42c cco の --effort max は警告しない" "$INSTALL_OUT" "cco エイリアスに --effort max がありません"
-  assert_not_contains "t42c cco の --permission-mode auto は警告しない" "$INSTALL_OUT" "cco エイリアスに --permission-mode auto がありません"
+  assert_not_contains "t42c cco は警告しない" "$INSTALL_OUT" "cco エイリアスに"
   assert_contains "t42c ccd の欠落を警告する" "$INSTALL_OUT" "ccd エイリアスに --permission-mode auto がありません"
   # ccw の判定は単純な有無ではなく引数順の検査なので、警告文言も専用の形になる
   assert_contains "t42c ccw の欠落を警告する" "$INSTALL_OUT" "ccw エイリアスの引数順が古い、または --permission-mode auto がありません"
   # 正本ブロックと警告時の置換用ブロックのドリフト検出（cco / ccd / ccw の
   # 3 行とも、置換用の案内が正本と文字列一致していることを固定する）
-  assert_contains "t42c 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort max'"
+  assert_contains "t42c 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'"
   assert_contains "t42c 置換用ブロックを提示する（ccd）" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
   assert_contains "t42c 置換用ブロックを提示する（ccw）" "$INSTALL_OUT" "alias ccw='claude --permission-mode auto -w'"
 }
@@ -513,7 +543,7 @@ EOF
 case_t42d_alias_ccw_wrong_order() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'
 alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'
 alias ccw='claude -w --permission-mode auto'
 # <<< claude-agents aliases <<<
@@ -532,7 +562,7 @@ EOF
 case_t42e_alias_ccd_missing_agent_claude() {
   cat > "${HOME}/.bashrc" <<'EOF'
 # >>> claude-agents aliases >>>
-alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'
 alias ccd='claude --permission-mode auto --model fable --effort high'
 alias ccw='claude --permission-mode auto -w'
 # <<< claude-agents aliases <<<
@@ -540,10 +570,58 @@ EOF
   run_install
   assert_eq "t42e 終了ステータス" "$INSTALL_STATUS" "0"
   assert_not_contains "t42e cco は警告しない" "$INSTALL_OUT" "cco エイリアスに"
-  assert_not_contains "t42e ccd の permission-mode は警告しない" "$INSTALL_OUT" "ccd エイリアスに --permission-mode auto がありません"
+  assert_not_contains "t42e ccd の permission-mode は警告しない" "$INSTALL_OUT" "ccd エイリアスに --permission-mode"
   assert_not_contains "t42e ccw は警告しない" "$INSTALL_OUT" "ccw エイリアスの引数順が古い"
   assert_contains "t42e ccd の --agent claude 欠落を警告する" "$INSTALL_OUT" "ccd エイリアスに --agent claude がありません"
   assert_contains "t42e 置換用ブロックを提示する" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
+}
+
+# 2026-08 より前の cco（--effort max）を入力とする。max は当時の意図した値
+# だったが、orchestrator を xhigh へ下げた決定によって「意図から外れた状態」に
+# なった。警告の発火条件は「rc の cco が現在意図している値を持たないこと」なので、
+# --effort というフラグ自体は在っても値が違えば警告する。これを固定しておかないと、
+# 既にインストール済みのマシンで install.sh を再実行しても O ペインが max のまま
+# 残り、決定が新規マシンにしか伝播しない。t42b が「意図した値を持つなら effort は
+# 警告しない」を固定するのに対し、こちらはその裏側を固定する。
+case_t42f_alias_cco_effort_max_is_stale() {
+  cat > "${HOME}/.bashrc" <<'EOF'
+# >>> claude-agents aliases >>>
+alias cco='claude --permission-mode auto --agent orchestrator --effort max'
+alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'
+alias ccw='claude --permission-mode auto -w'
+# <<< claude-agents aliases <<<
+EOF
+  run_install
+  assert_eq "t42f 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t42f --effort max を古いブロックとして警告する" "$INSTALL_OUT" "cco エイリアスに --effort xhigh がありません"
+  assert_not_contains "t42f cco の permission-mode は警告しない" "$INSTALL_OUT" "cco エイリアスに --permission-mode"
+  assert_not_contains "t42f ccd は警告しない" "$INSTALL_OUT" "ccd エイリアスに"
+  assert_not_contains "t42f ccw は警告しない" "$INSTALL_OUT" "ccw エイリアスの"
+  assert_contains "t42f 置換用ブロックを提示する（cco）" "$INSTALL_OUT" "alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'"
+}
+
+# ccd から --model fable だけを落とした rc。--agent claude はビルトインで
+# frontmatter の model を持たないため、このフラグを落とすと D ペインのモデル
+# 指定そのものが消える。既定のメインセッションも Fable になった 2026-08 以降は
+# 「Fable でないこと」が見た目で分からなくなったので、検査が無いと欠落が静かに
+# 残る。t42e（--agent claude だけを落とす）と対になり、ccd の 2 本のフラグが
+# 互いに独立して検査されていることを固定する。
+case_t42g_alias_ccd_missing_model_fable() {
+  cat > "${HOME}/.bashrc" <<'EOF'
+# >>> claude-agents aliases >>>
+alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'
+alias ccd='claude --permission-mode auto --agent claude --effort high'
+alias ccw='claude --permission-mode auto -w'
+# <<< claude-agents aliases <<<
+EOF
+  run_install
+  assert_eq "t42g 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t42g ccd の --model fable 欠落を警告する" "$INSTALL_OUT" "ccd エイリアスに --model fable がありません"
+  assert_not_contains "t42g ccd の --agent claude は警告しない" "$INSTALL_OUT" "ccd エイリアスに --agent claude"
+  assert_not_contains "t42g ccd の permission-mode は警告しない" "$INSTALL_OUT" "ccd エイリアスに --permission-mode"
+  assert_not_contains "t42g cco は警告しない" "$INSTALL_OUT" "cco エイリアスに"
+  assert_not_contains "t42g ccw は警告しない" "$INSTALL_OUT" "ccw エイリアスの"
+  assert_contains "t42g 置換用ブロックを提示する（ccd）" "$INSTALL_OUT" "alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'"
 }
 
 # ---------------------------------------------------------------- README
