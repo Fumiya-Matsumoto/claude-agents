@@ -1,6 +1,7 @@
 ---
 name: agents-feedback
 description: claude-agents（auto-router / orchestrator / worker 群）の運用で得た知見・違和感・改善案を GitHub Issue に記録し、エージェント定義の改訂へ還元する。トリガー: 「エージェントFB」「ルーターFB」「エージェント改善」「ルーティングおかしい」「FB蒸留」「feedback消化」等。
+disable-model-invocation: true
 ---
 
 # agents-feedback — 運用知見の還元ループ
