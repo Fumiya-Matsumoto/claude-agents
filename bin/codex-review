@@ -148,7 +148,7 @@ codex exec review - \
   --disable apps \
   -c sandbox_mode=read-only \
   -c approval_policy=never \
-  -m gpt-5.6-sol \
+  -m gpt-6-astra \
   -c model_reasoning_effort="xhigh" \
   -o "$OUT" \
   > "$LOG" 2>&1 << EOF

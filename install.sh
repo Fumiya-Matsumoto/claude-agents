@@ -203,10 +203,10 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
     # 注意書きと同じ設計上の理由）。
     # 注意: settings.json の effortLevel が受け付ける値は enum で
     # "low"/"medium"/"high"/"xhigh" に限定されており "max" は存在しない
-    # （不正値は黙って捨てられる）。orchestrator を "max" で走らせるには
-    # settings.json ではなく --effort フラグが必須なのはこのため（cco
-    # エイリアス側で --effort max を明示している。README の「ペイン運用」を
-    # 参照）。
+    # （不正値は黙って捨てられる）。メインセッション 2 体の天井が xhigh なのは
+    # これが理由で、選んだ値ではない。cco 側で --effort xhigh を明示している
+    # のは、プロジェクト側の .claude/settings.json が effortLevel を上書きした
+    # 場合に O ペインを守るため（README の「ペイン運用」を参照）。
     prev_effort="$(jq -r 'if has("effortLevel") then (.effortLevel|tojson) else empty end' "$SETTINGS" 2>/dev/null || true)"
     tmp="$(mktemp_settings "$SETTINGS_DIR")"
     if [ -z "$tmp" ]; then
@@ -452,7 +452,7 @@ if ! grep -qF "$MARKER" "$RC" 2>/dev/null; then
   cat >> "$RC" << EOF
 
 $MARKER
-alias cco='claude --permission-mode auto --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
+alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'               # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）
 alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）
 alias ccw='claude --permission-mode auto -w'                                                # Worker ペイン（worktree 自動作成）
 $MARKER_END
@@ -463,8 +463,10 @@ else
   # 既存ブロックがある場合、install.sh は MARKER の有無だけで判定して冪等に
   # している（rc は書き換えない）ため、cco / ccd / ccw が期待するフラグを
   # 含まない古いブロックのままだと再実行しても更新されない。--effort フラグは
-  # settings.json の effortLevel に勝つ唯一の手段なので、放置すると
-  # orchestrator の意図した effort（max）が実効しない。--permission-mode auto
+  # プロジェクト側の .claude/settings.json による effortLevel の上書きに勝つ
+  # 唯一の手段なので、放置すると orchestrator の effort が意図（xhigh）から
+  # 外れる。2026-08 より前のブロックは --effort max を持っており、これも
+  # 「意図から外れた状態」に当たるので警告の対象になる。--permission-mode auto
   # フラグが無いと、そのペインは既定の権限モードで開き shift+tab の入れ直しが
   # 要る。ユーザーの rc を無断で書き換えるのは避け、警告と手動更新の案内に
   # 留める。
@@ -506,9 +508,18 @@ else
     done
   }
 
-  check_alias_flag cco "$cco_line" '--effort max' \
-    '--effort フラグは settings.json の effortLevel に勝つ唯一の手段なので、このままだと' \
-    'orchestrator の effort が意図どおり max になりません。'
+  # 帰結は rc の中身で 2 通りに分かれるので、両方を書く。--effort を 1 つも
+  # 持たない rc なら実効値は settings.json 由来の xhigh になり、プロジェクト側の
+  # .claude/settings.json が effortLevel を上書きしたときだけ意図から外れる。
+  # 一方 2026-08 より前のブロックは --effort max を持っており、この場合は
+  # 上書きが無くても max のまま実効する。「このままだと必ず xhigh にならない」と
+  # 書くと前者に対して偽になるため、条件を明示する。
+  check_alias_flag cco "$cco_line" '--effort xhigh' \
+    '--effort フラグはプロジェクト側の .claude/settings.json による effortLevel の上書きに' \
+    '勝つ唯一の手段です。--effort を持たない rc なら実効値は settings.json 由来の xhigh に' \
+    'なりますが、プロジェクト側に上書きされると O ペインもそれに引き下げられます。' \
+    '2026-08 より前のブロックが持つ --effort max の場合は、上書きが無くても max のまま' \
+    '実効し、orchestrator の意図した深さ（xhigh）から外れ続けます。'
   check_alias_flag cco "$cco_line" '--permission-mode auto' \
     'ペインが既定の権限モードで開くため、開くたびに shift+tab で auto mode へ入れ直す手間が' \
     '残ります。'
@@ -524,6 +535,18 @@ else
     '"agent": "auto-router" は --model を渡しても効き続けるため、これが無いと D ペインは' \
     '「Fable の上に auto-router を着せた」セッションになり、Tier 3 ゲートが決定セッションを' \
     '推奨するのに自分がその決定セッションである、という自己矛盾が起きます' \
+    '（README の「ペイン運用」を参照）。'
+  # --model fable は --agent claude とセットで初めて意味を持つ。ビルトインの
+  # claude エージェントはこのリポジトリのファイルではないので frontmatter の
+  # model を持たず、フラグを落とすとモデル指定そのものが消える。既定のメイン
+  # セッションが Fable になった 2026-08 以降、この欠落は見た目では分からない
+  # （どのペインを開いても Fable なので「Fable でないこと」に気づく手がかりが
+  # 無い）。落ちる先は Tier 3 ゲートが全アーキテクチャ作業を送る D ペインなので、
+  # 検査を 1 本立てておく。
+  check_alias_flag ccd "$ccd_line" '--model fable' \
+    'ビルトインの claude エージェントは frontmatter の model を持たないため、これが無いと' \
+    'D ペインのモデル指定そのものが消えます。既定のメインセッションも Fable になったので' \
+    '見た目では区別が付きませんが、Tier 3 ゲートが送る先はこのペインです' \
     '（README の「ペイン運用」を参照）。'
 
   # ccw だけは単純な部分文字列検査ではなく、--permission-mode auto が -w より
@@ -548,7 +571,7 @@ else
     echo '  手動で置き換えてください:'
     echo ''
     echo "  $MARKER"
-    echo "  alias cco='claude --permission-mode auto --agent orchestrator --effort max'                 # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
+    echo "  alias cco='claude --permission-mode auto --agent orchestrator --effort xhigh'               # Orchestrator ペイン（管理専任。--effort が settings.json の effortLevel に勝つ）"
     echo "  alias ccd='claude --permission-mode auto --model fable --agent claude --effort high'        # Decision ペイン（素の Fable で意思決定）"
     echo "  alias ccw='claude --permission-mode auto -w'                                                # Worker ペイン（worktree 自動作成）"
     echo "  $MARKER_END"
