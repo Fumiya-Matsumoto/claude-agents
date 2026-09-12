@@ -96,9 +96,9 @@ EOF
 1. `~/.claude/bin/codex-ratelimits models` を叩く（`codex app-server` の
    `model/list` を消費ゼロで読む。python3 が要る。無ければこの確認は
    スキップしてよい — 専用の監視経路ではないので無理に代替経路を探さない）
-2. 出力の `data[].id` に、`bin/codex-review` が固定している `gpt-5.6-sol`
+2. 出力の `data[].id` に、`bin/codex-review` が固定している `gpt-6-astra`
    がまだ存在するか確認する。**消えていれば引退**
-3. `gpt-5.6-sol` の要素の `supportedReasoningEfforts` に、`bin/codex-review`
+3. `gpt-6-astra` の要素の `supportedReasoningEfforts` に、`bin/codex-review`
    が固定している `xhigh` が含まれるか確認する。**消えていれば同様に引退**
 4. `supportedReasoningEfforts` の**上位に、既知の集合
    （`low` / `medium` / `high` / `xhigh` / `max` / `ultra`。2026-07-31 時点）

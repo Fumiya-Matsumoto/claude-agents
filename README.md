@@ -58,7 +58,7 @@ codex exec review - \
   --disable apps \                      # MCP の裏口を閉じる（実測で確定）
   -c sandbox_mode=read-only \
   -c approval_policy=never \
-  -m gpt-5.6-sol \
+  -m gpt-6-astra \
   -c model_reasoning_effort="xhigh" \
   -o <出力先>
 ```
@@ -268,7 +268,7 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 
 ### (D) Codex 側の値の陳腐化
 
-`bin/codex-review` が固定している `-m gpt-5.6-sol` と `-c model_reasoning_effort="xhigh"` は、**陳腐化する前提の値**です（モデル一覧には既に旧世代が並んでおり、このスラッグも同じ道を辿ります）。明示しているのは、CLI 既定が版ごとに動くとマシン間で実効値がズレるためです。
+`bin/codex-review` が固定している `-m gpt-6-astra` と `-c model_reasoning_effort="xhigh"` は、**陳腐化する前提の値**です（モデル一覧には既に旧世代が並んでおり、このスラッグも同じ道を辿ります）。明示しているのは、CLI 既定が版ごとに動くとマシン間で実効値がズレるためです。
 
 **引退時の挙動は未検証**で、エラーになるのか**黙って別モデルに差し替えられる**のかが分かっていません（app-server に reroute イベントが存在するため）。ただし**どちらでも取るべき行動は「値を見直す」の一択**なので、ここに専用の監視経路は作らず、(B) の再調整と `agents-feedback` ループに合流させます。
 
