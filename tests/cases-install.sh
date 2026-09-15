@@ -745,3 +745,171 @@ case_t52_uninstall_drops_preexisting_empty_permissions() {
   assert_eq "t52 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
   assert_eq "t52 permissions キー自体が消える" "$(jq -r 'has("permissions")' "$s")" "false"
 }
+
+# ---------------------------------------------------------------- .env.CLAUDE_CODE_SUBAGENT_MODEL
+
+# フレッシュな環境で .env.CLAUDE_CODE_SUBAGENT_MODEL が "opus" になること
+# （実物の claude が PATH にあり 2.1.251 以上なので書き込まれるはず）
+case_t53_subagent_model_fresh() {
+  local s="${HOME}/.claude/settings.json"
+  run_install
+  assert_eq "t53 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t53 env.CLAUDE_CODE_SUBAGENT_MODEL が opus になる" \
+    "$(jq -r '.env.CLAUDE_CODE_SUBAGENT_MODEL' "$s")" "opus"
+  assert_contains "t53 設定メッセージ" "$INSTALL_OUT" '".env.CLAUDE_CODE_SUBAGENT_MODEL": "opus" を設定'
+}
+
+# 2 回目の実行では「元の値」メッセージが出ず、値も変わらないこと（冪等性）
+case_t54_subagent_model_idempotent() {
+  local s="${HOME}/.claude/settings.json" first
+  run_install
+  first="$(cat "$s")"
+  run_install
+  assert_eq "t54 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t54 env.CLAUDE_CODE_SUBAGENT_MODEL は opus のまま" \
+    "$(jq -r '.env.CLAUDE_CODE_SUBAGENT_MODEL' "$s")" "opus"
+  assert_not_contains "t54 元の値メッセージは出ない" "$INSTALL_OUT" "元の値"
+  assert_eq "t54 settings.json の内容が同じ" "$(cat "$s")" "$first"
+}
+
+# 既存値 "sonnet" があると "opus" に上書きされ、「元の値」メッセージが出る。
+# 同じ .env 内の他のキー（兄弟キー）は残ることも確認する
+case_t55_subagent_model_overwrite() {
+  local s="${HOME}/.claude/settings.json"
+  write_settings "$s" '{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"sonnet","OTHER_KEY":"keep-me"}}'
+  run_install
+  assert_eq "t55 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t55 env.CLAUDE_CODE_SUBAGENT_MODEL が opus になる" \
+    "$(jq -r '.env.CLAUDE_CODE_SUBAGENT_MODEL' "$s")" "opus"
+  assert_contains "t55 元の値を上書きした旨を表示する" "$INSTALL_OUT" '元の値 "sonnet" を上書き'
+  assert_eq "t55 兄弟キーは残る" "$(jq -r '.env.OTHER_KEY' "$s")" "keep-me"
+}
+
+# claude が 2.1.251 未満（旧 CLI）だと書き込まれず、スキップのメッセージが
+# 出ること。agent / effortLevel は影響を受けず設定されることも確認する
+case_t56_subagent_model_old_cli() {
+  local s="${HOME}/.claude/settings.json" stubs
+  stubs="$(stub_dir)"
+  cat > "${stubs}/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "2.1.250 (Claude Code)"
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${stubs}/claude"
+  export PATH="${stubs}:${PATH}"
+  run_install
+  export PATH="$ORIG_PATH"
+  assert_eq "t56 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t56 env.CLAUDE_CODE_SUBAGENT_MODEL は設定されない" \
+    "$(jq -r '(.env // {}) | has("CLAUDE_CODE_SUBAGENT_MODEL")' "$s")" "false"
+  assert_contains "t56 スキップのメッセージが出る" "$INSTALL_OUT" "2.1.251"
+  assert_eq "t56 agent は設定される" "$(jq -r '.agent' "$s")" "auto-router"
+  assert_eq "t56 effortLevel は設定される" "$(jq -r '.effortLevel' "$s")" "xhigh"
+}
+
+# claude が PATH に無い場合、書き込まれずスキップのメッセージが出ること
+case_t57_subagent_model_no_claude_in_path() {
+  local s="${HOME}/.claude/settings.json" newpath="" dir old_ifs="$IFS"
+  IFS=':'
+  for dir in $ORIG_PATH; do
+    [ -n "$dir" ] || continue
+    if [ -x "${dir}/claude" ]; then
+      continue
+    fi
+    newpath="${newpath:+${newpath}:}${dir}"
+  done
+  IFS="$old_ifs"
+  export PATH="$newpath"
+  run_install
+  export PATH="$ORIG_PATH"
+  assert_eq "t57 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t57 env.CLAUDE_CODE_SUBAGENT_MODEL は設定されない" \
+    "$(jq -r '(.env // {}) | has("CLAUDE_CODE_SUBAGENT_MODEL")' "$s")" "false"
+  assert_contains "t57 スキップのメッセージが出る" "$INSTALL_OUT" "claude コマンドが PATH に見つかりません"
+}
+
+# claude --version の出力が解釈できない場合も書き込まれないこと
+case_t58_subagent_model_unparseable_version() {
+  local s="${HOME}/.claude/settings.json" stubs
+  stubs="$(stub_dir)"
+  cat > "${stubs}/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+  echo "banana"
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${stubs}/claude"
+  export PATH="${stubs}:${PATH}"
+  run_install
+  export PATH="$ORIG_PATH"
+  assert_eq "t58 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t58 env.CLAUDE_CODE_SUBAGENT_MODEL は設定されない" \
+    "$(jq -r '(.env // {}) | has("CLAUDE_CODE_SUBAGENT_MODEL")' "$s")" "false"
+  assert_contains "t58 解釈できない旨のメッセージが出る" "$INSTALL_OUT" "バージョンを解釈できませんでした"
+}
+
+# CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0 で .env.CLAUDE_CODE_SUBAGENT_MODEL の
+# 書き込みだけをスキップできること（agent / effortLevel / Stop フックは
+# 影響を受けない。t51 と同じ不変条件）
+case_t59_subagent_model_opt_out() {
+  local s="${HOME}/.claude/settings.json"
+  export CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0
+  run_install
+  unset CLAUDE_AGENTS_SET_SUBAGENT_MODEL
+  assert_eq "t59 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t59 env.CLAUDE_CODE_SUBAGENT_MODEL は設定されない" \
+    "$(jq -r '(.env // {}) | has("CLAUDE_CODE_SUBAGENT_MODEL")' "$s")" "false"
+  assert_contains "t59 スキップした旨を表示する" "$INSTALL_OUT" "CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0"
+  assert_eq "t59 agent は設定される" "$(jq -r '.agent' "$s")" "auto-router"
+  assert_eq "t59 effortLevel は設定される" "$(jq -r '.effortLevel' "$s")" "xhigh"
+  assert_eq "t59 Stop フックは登録される" "$(registered_hook_commands "$s" | wc -l | tr -d ' ')" "1"
+}
+
+# .env が非オブジェクト（配列）のとき、jq '.env.CLAUDE_CODE_SUBAGENT_MODEL = ...'
+# を直接叩くと生の型エラーが出る。書き込み前に型を判定し、非オブジェクトの
+# ときは専用の警告で継続すること・生エラーを出さないこと・.env の値も他の
+# キーも壊さないこと・以降のステップ（agent 設定・エイリアス登録）に到達
+# すること・一時ファイルの残骸が無いことを確認する（t50 と同型）
+case_t60_subagent_model_non_object_env() {
+  local s="${HOME}/.claude/settings.json"
+  write_settings "$s" '{"env":["x"],"canary":"keep-me"}'
+  run_install
+  assert_eq "t60 終了ステータス" "$INSTALL_STATUS" "0"
+  assert_contains "t60 専用の警告が出る" "$INSTALL_OUT" '".env" がオブジェクトではありません'
+  assert_eq "t60 env の値は壊れない" "$(jq -c '.env' "$s")" '["x"]'
+  assert_eq "t60 canary は残る" "$(jq -r '.canary' "$s")" "keep-me"
+  assert_eq "t60 agent が設定される" "$(jq -r '.agent' "$s")" "auto-router"
+  assert_contains "t60 エイリアス登録まで到達する" "$INSTALL_OUT" "aliases:"
+  assert_eq "t60 stderr に jq の生エラーが出ない" "$INSTALL_ERR" ""
+  assert_eq "t60 一時ファイルの残骸が無い" \
+    "$(find "${HOME}/.claude" -maxdepth 1 -name '.settings.json.install.*' 2>/dev/null | wc -l | tr -d ' ')" "0"
+}
+
+# README のアンインストール手順で .env.CLAUDE_CODE_SUBAGENT_MODEL が消え、
+# 削除の結果 .env が空になったら .env 自体も消えること（t43 / t49 が手本）
+case_t61_readme_uninstall_env_roundtrip() {
+  local s="${HOME}/.claude/settings.json" snippet="${SANDBOX}/uninstall.sh" status
+  run_install
+  assert_eq "t61 install の終了ステータス" "$INSTALL_STATUS" "0"
+  assert_eq "t61 env.CLAUDE_CODE_SUBAGENT_MODEL が opus になる" \
+    "$(jq -r '.env.CLAUDE_CODE_SUBAGENT_MODEL' "$s")" "opus"
+  if ! extract_uninstall_snippet "$snippet"; then
+    fail "t61: README からアンインストール手順を抽出できない"
+    return
+  fi
+  assert_sandboxed_home
+  bash "$snippet" >"${SANDBOX}/uninstall.out" 2>"${SANDBOX}/uninstall.err"
+  status=$?
+  assert_eq "t61 アンインストールの終了ステータス" "$status" "0"
+  assert_eq "t61 stderr は空" "$(cat "${SANDBOX}/uninstall.err")" ""
+  assert_eq "t61 env.CLAUDE_CODE_SUBAGENT_MODEL が消える" \
+    "$(jq -r '(.env // {}) | has("CLAUDE_CODE_SUBAGENT_MODEL")' "$s")" "false"
+  # t61 の入力は env.CLAUDE_CODE_SUBAGENT_MODEL 以外に兄弟キーを持たないため、
+  # 削除の結果 .env ごと消えるはず
+  assert_eq "t61 兄弟キーが無いため env ごと消える" "$(jq -r 'has("env")' "$s")" "false"
+}

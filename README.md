@@ -349,26 +349,30 @@ Fable の週次 50% キャップに**初めて**当たったときは、観測�
 cd /path/to/claude-agents
 
 # 1. settings.json から "agent" キー・"effortLevel" キー・"permissions.defaultMode"
-#    キーと Stop フックの登録エントリを削除（symlink を先に消すと、切れた
-#    symlink をフックが毎ターン叩く状態が残るため必ず先に実行する）
+#    キー・".env.CLAUDE_CODE_SUBAGENT_MODEL" キーと Stop フックの登録エントリを
+#    削除（symlink を先に消すと、切れた symlink をフックが毎ターン叩く状態が
+#    残るため必ず先に実行する）
 #    settings.json が symlink（dotfiles 管理等）の場合、mv はリンクを辿らず
 #    リンク自体を置き換えてしまうため、実体パスへ解決してから同じディレクトリに
 #    一時ファイルを作って書き戻す
-#    注意: del(.agent, .effortLevel) および permissions.defaultMode の削除は
-#    ハーネスの既定値に戻すだけであり、インストール前にユーザーが settings.json
-#    に置いていた元の値には戻らない。元の値は install.sh が作成した
-#    ~/.claude/settings.json.bak.<タイムスタンプ> に残っているので、必要なら
-#    そこから手動で復元すること。permissions.defaultMode は .permissions から
-#    その 1 キーだけを消し、ユーザーが元から持っていた .permissions.allow 等の
-#    兄弟キーは残す。削除の結果 .permissions が空オブジェクトになった場合のみ
-#    .permissions 自体も消す（インストール前が {"permissions":{}} のように
-#    defaultMode 以外のキーを 1 つも持たない状態だった環境でも同様で、この場合
-#    .permissions キー自体が消える）
+#    注意: del(.agent, .effortLevel) および permissions.defaultMode /
+#    .env.CLAUDE_CODE_SUBAGENT_MODEL の削除はハーネスの既定値に戻すだけであり、
+#    インストール前にユーザーが settings.json に置いていた元の値には戻らない。
+#    元の値は install.sh が作成した ~/.claude/settings.json.bak.<タイムスタンプ>
+#    に残っているので、必要ならそこから手動で復元すること。permissions.defaultMode
+#    は .permissions から、.env.CLAUDE_CODE_SUBAGENT_MODEL は .env から、それぞれ
+#    その 1 キーだけを消し、ユーザーが元から持っていた .permissions.allow や
+#    .env の他のキー等の兄弟キーは残す。削除の結果 .permissions または .env が
+#    空オブジェクトになった場合のみ、そのオブジェクト自体も消す（インストール前が
+#    {"permissions":{}} や {"env":{}} のように該当キー以外を 1 つも持たない状態
+#    だった環境でも同様で、この場合はそのキー自体が消える）
 #    注意: CLAUDE_AGENTS_SET_DEFAULT_MODE=0 でインストールした環境では install.sh が
 #    permissions.defaultMode に一切触れていないため、この手順をそのまま実行すると
 #    インストール前からユーザー自身が置いていた defaultMode の設定まで消えてしまう。
 #    該当する場合は、下の jq 式のうち permissions.defaultMode を削除する節を外してから
-#    実行すること。
+#    実行すること。CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0 でインストールした環境、および
+#    claude が 2.1.251 未満でバージョンゲートによりスキップされた環境についても同様に、
+#    .env.CLAUDE_CODE_SUBAGENT_MODEL を削除する節を外してから実行すること
 #    全体を ( ) のサブシェルに入れてあるのは、作業用の変数を対話シェルに
 #    残さないため。失敗時はメッセージを出して settings.json を変更せずに抜ける
 (
@@ -394,6 +398,10 @@ cd /path/to/claude-agents
       | if (.permissions? | type) == "object" then
           (.permissions |= del(.defaultMode))
           | if (.permissions | length) == 0 then del(.permissions) else . end
+        else . end
+      | if (.env? | type) == "object" then
+          (.env |= del(.CLAUDE_CODE_SUBAGENT_MODEL))
+          | if (.env | length) == 0 then del(.env) else . end
         else . end' \
       "$real" > "$tmp"; then
     mv "$tmp" "$real"

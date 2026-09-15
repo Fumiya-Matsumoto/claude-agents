@@ -292,6 +292,140 @@ if [ -n "$SETTINGS_DIR" ] && command -v jq >/dev/null 2>&1; then
       esac
     fi
 
+    # .env.CLAUDE_CODE_SUBAGENT_MODEL を "opus" に設定する。
+    #
+    # なぜ settings.json の専用キーではなく env ブロックか: CLAUDE_CODE_SUBAGENT_MODEL は
+    # CLI が環境変数としてしか読まない（CLI バイナリ調査済み。settings.json 側に
+    # 対応する専用キーは存在せず、"/config" のピッカーも無い）。settings.json の
+    # .env ブロックに書いた値は CLI が起動時に環境変数として展開するため、ここが
+    # 唯一の置き場所になる。
+    #
+    # 何に効くか: frontmatter でモデルが決まっていないサブエージェント（組み込みの
+    # general-purpose や、モデル未指定のプラグインエージェント）の既定モデルを
+    # 決める環境変数。このリポジトリの 10 体は全部 frontmatter で model を固定
+    # しているため影響を受けないが、それ以外がメインセッションのモデル（Fable）を
+    # 継承してしまうのを防げる。
+    #
+    # バージョンゲート（2.1.251 以上でのみ書き込む）: Claude Code v2.1.251 で
+    # サブエージェントのモデル解決順が変わった。それ以前は CLAUDE_CODE_SUBAGENT_MODEL
+    # が frontmatter より先に効き、"model: inherit" すら上書きしていた。つまり旧
+    # バージョンの CLI が入ったマシンにこの設定を入れると、model: fable で固定して
+    # いる frontier-orchestrator / frontier-reviewer / frontier-solver が黙って
+    # Opus に落ちる。settings.json は machine-local で配布されないが install.sh は
+    # 各マシンで実行されるので、ゲートはここに置くのが正しい（毎ターン走る Stop
+    # フックに `claude --version` を生やすのは論外）。
+    #
+    # claude が PATH に無い場合、および --version の出力からバージョンを解釈でき
+    # ない場合もスキップする。理由は非対称性 ―― 「入れ損ねる」コストは使用量の
+    # 増加（/tasks で見えるし後から入れ直せる）で済むのに対し、「誤って入れる」
+    # コストは最上位ティア（frontier-*）の静かな品質劣化で気づきにくい。安全側 =
+    # 書かない。
+    #
+    # CLAUDE_CODE_SUBAGENT_MODEL_FORCE は意図的に設定しない: これは全 frontmatter を
+    # 無視するため、model: fable で固定している frontier-orchestrator /
+    # frontier-reviewer / frontier-solver まで Opus に潰れ、このリポジトリのティア
+    # 構造が壊れる。
+    #
+    # 無効化: 環境変数 CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0 で、この
+    # .env.CLAUDE_CODE_SUBAGENT_MODEL の書き込みだけをスキップする（命名と作法は
+    # CLAUDE_AGENTS_SET_DEFAULT_MODE=0 / CLAUDE_AGENTS_STRIP_MODEL=0 の先例に
+    # 合わせる）。
+    #
+    # 注意: settings.json はグローバル（~/.claude/settings.json）な設定ファイルな
+    # ので、この .env.CLAUDE_CODE_SUBAGENT_MODEL は（effortLevel と同じく）マシン
+    # 全体に効く。このリポジトリと無関係なプロジェクトのサブエージェントにも
+    # 影響する。
+    if [ "${CLAUDE_AGENTS_SET_SUBAGENT_MODEL:-}" = "0" ]; then
+      echo 'settings.json: CLAUDE_AGENTS_SET_SUBAGENT_MODEL=0 のため ".env.CLAUDE_CODE_SUBAGENT_MODEL" の設定をスキップしました'
+    elif ! command -v claude >/dev/null 2>&1; then
+      echo '⚠ claude コマンドが PATH に見つかりません。Claude Code v2.1.251 以上が必要なため'
+      echo '  ".env.CLAUDE_CODE_SUBAGENT_MODEL" の自動設定はスキップします。手動で入れるなら'
+      echo '  settings.json の env ブロックに "CLAUDE_CODE_SUBAGENT_MODEL": "opus" を追加してください。'
+    else
+      claude_version_output="$(claude --version 2>/dev/null || true)"
+      claude_version="${claude_version_output%% *}"
+      # claude --version の出力（例: "2.1.269 (Claude Code)"）の先頭トークンを
+      # "." で 3 分割し、各パートを数値として比較する（文字列比較だと
+      # "2.1.9" > "2.1.10" のような誤判定が起きるため）。3 パートちょうどで
+      # 全パートが数値でない場合は解釈不能（戻り値 2）として扱う。
+      version_ge_2_1_251() { # $1: "X.Y.Z" 形式のバージョン文字列
+        local v="$1" major minor patch rest
+        major="${v%%.*}"
+        rest="${v#*.}"
+        case "$rest" in "$v") return 2 ;; esac
+        case "$rest" in *.*) ;; *) return 2 ;; esac
+        minor="${rest%%.*}"
+        patch="${rest#*.}"
+        case "$patch" in *.*) return 2 ;; esac
+        case "$major" in ''|*[!0-9]*) return 2 ;; esac
+        case "$minor" in ''|*[!0-9]*) return 2 ;; esac
+        case "$patch" in ''|*[!0-9]*) return 2 ;; esac
+        if [ "$major" -ne 2 ]; then
+          if [ "$major" -gt 2 ]; then return 0; else return 1; fi
+        fi
+        if [ "$minor" -ne 1 ]; then
+          if [ "$minor" -gt 1 ]; then return 0; else return 1; fi
+        fi
+        if [ "$patch" -ge 251 ]; then return 0; else return 1; fi
+      }
+      if version_ge_2_1_251 "$claude_version"; then
+        version_check=0
+      else
+        version_check=$?
+      fi
+      case "$version_check" in
+        2)
+          echo "⚠ claude --version の出力（\"${claude_version_output}\"）からバージョンを解釈できませんでした。"
+          echo '  Claude Code v2.1.251 以上が必要なため ".env.CLAUDE_CODE_SUBAGENT_MODEL" の自動設定は'
+          echo '  スキップします。手動で入れるなら settings.json の env ブロックに'
+          echo '  "CLAUDE_CODE_SUBAGENT_MODEL": "opus" を追加してください。'
+          ;;
+        1)
+          echo "⚠ claude のバージョン（${claude_version}）は 2.1.251 未満です。\".env.CLAUDE_CODE_SUBAGENT_MODEL\" の"
+          echo '  自動設定はスキップします（このバージョンでは frontmatter より先に効いてしまうため）。'
+          echo '  Claude Code を 2.1.251 以上に更新するか、手動で入れるなら settings.json の env'
+          echo '  ブロックに "CLAUDE_CODE_SUBAGENT_MODEL": "opus" を追加してください。'
+          ;;
+        *)
+          # .env がオブジェクトでない・存在しない場合でも jq がエラーにならない
+          # よう、書き込み前に型を判定する（.permissions の型ガードと同型。
+          # 存在しない（null）か object のときだけ書き込み、それ以外（配列等）の
+          # ときは jq の生エラーを表に出さず、専用の警告と手動対応の案内だけを
+          # 出す）。
+          env_type="$(jq -r '.env | type' "$SETTINGS" 2>/dev/null || true)"
+          case "$env_type" in
+            object|null|'')
+              prev_subagent_model="$(jq -r '
+                if (.env | type) == "object" and (.env | has("CLAUDE_CODE_SUBAGENT_MODEL"))
+                then (.env.CLAUDE_CODE_SUBAGENT_MODEL | tojson)
+                else empty end
+              ' "$SETTINGS" 2>/dev/null || true)"
+              tmp="$(mktemp_settings "$SETTINGS_DIR")"
+              if [ -z "$tmp" ]; then
+                echo '⚠ 一時ファイルの作成に失敗しました（読み取り専用ディレクトリ等）。".env.CLAUDE_CODE_SUBAGENT_MODEL" の設定をスキップします。手動で追加してください。'
+              elif jq '.env.CLAUDE_CODE_SUBAGENT_MODEL = "opus"' "$SETTINGS" > "$tmp"; then
+                preserve_mode "$SETTINGS" "$tmp"
+                mv "$tmp" "$SETTINGS"
+                if [ -n "$prev_subagent_model" ] && [ "$prev_subagent_model" != '"opus"' ]; then
+                  echo "settings.json: \".env.CLAUDE_CODE_SUBAGENT_MODEL\": \"opus\" を設定（元の値 ${prev_subagent_model} を上書き）"
+                else
+                  echo 'settings.json: ".env.CLAUDE_CODE_SUBAGENT_MODEL": "opus" を設定'
+                fi
+              else
+                rm -f "$tmp"
+                echo '⚠ settings.json への ".env.CLAUDE_CODE_SUBAGENT_MODEL" 設定に失敗しました（jq エラー）。手動で追加してください。'
+              fi
+              ;;
+            *)
+              echo "⚠ settings.json の \".env\" がオブジェクトではありません（型: ${env_type}）。"
+              echo '  壊さないために ".env.CLAUDE_CODE_SUBAGENT_MODEL" の自動設定はスキップします。手動で'
+              echo '  ".env" をオブジェクトに直したうえで "CLAUDE_CODE_SUBAGENT_MODEL": "opus" を追加してください。'
+              ;;
+          esac
+          ;;
+      esac
+    fi
+
     # Stop フックへ claude-agents-strip-model.sh を追記登録する。既存の Stop
     # エントリ（例: notify-stop.sh）や SessionStart フックは絶対に壊さない。
     # コマンド文字列に claude-agents-strip-model.sh を含むかどうかで既存判定
